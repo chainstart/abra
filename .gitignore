@@ -2,5 +2,12 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.venv/
 *.json
 !/contracts/**
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+figures/generated/*
+!figures/generated/.gitkeep

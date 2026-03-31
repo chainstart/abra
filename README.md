@@ -75,6 +75,39 @@ python3 scanner.py --target ../contracts/lido/ --output json --output-file /tmp/
 python3 report_generator.py --input /tmp/scan.json --protocol-name "Lido" --output ../reports/auto_lido.md
 ```
 
+### Run Phase-1 Data Pipeline
+
+```bash
+# From repository root
+python3 tools/pipeline/run_phase1.py --start-page 1 --end-page 3 --top-protocols 200
+
+# Output:
+# - data/raw/slowmist/
+# - data/raw/defillama/
+# - data/processed/
+# - reports/17_phase1_data_quality.md
+
+# Generate top incident replay cards
+python3 tools/pipeline/generate_event_cards.py --top-n 50
+```
+
+### Run Phase-2 Shortlisting And Replay Skeleton
+
+```bash
+# Select the first replay batch from normalized incidents
+python3 tools/pipeline/select_phase2_incidents.py
+
+# Generate replay cards for the selected batch
+python3 tools/pipeline/generate_event_cards.py \
+  --selected-incidents-csv data/processed/phase2_batch1_incidents.csv \
+  --output-dir reports/events \
+  --top-n 12
+
+# Validate Foundry replay skeleton
+forge test --match-path test/replay/Phase2Batch1Catalog.t.sol
+forge test --match-path test/replay/EulerFinanceReplay.t.sol
+```
+
 ## Audit Framework
 
 Based on **OWASP Smart Contract Top 10 (2026)** with protocol-specific business logic analysis:
