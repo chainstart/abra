@@ -606,7 +606,6 @@ class ArithmeticAnalyzer(BaseAnalyzer):
 
         return findings
 
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -624,14 +623,3 @@ class ArithmeticAnalyzer(BaseAnalyzer):
                     return i + 1
             i += 1
         return len(content)
-
-        
-def print_audit_status():
-    """这是我为项目增加的审计状态追踪功能"""
-    print("\n" + "="*50)
-    print(">>> [审计日志] 算术逻辑分析器正在运行...")
-    print(">>> [状态] 正在扫描：硬编码、溢出及精度损失风险")
-    print("="*50 + "\n")
-
-# 在这里直接调用它，确保每次加载这个分析器都会显示
-print_audit_status()
