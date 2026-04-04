@@ -1,0 +1,233 @@
+<div class="wrap">
+  <section class="hero">
+    <div class="card">
+      <p class="eyebrow">本地工作台</p>
+      <h1>DeFi Security Agent MVP</h1>
+      <p class="muted">
+        这是当前项目的统一入口。你可以直接提交审计任务、研究任务、深分析任务和链上监控任务，
+        系统会把结果归档，并提供详情页与工件预览。
+      </p>
+      <div class="toolbar">
+        <span class="status">审计闭环可用</span>
+        <span class="status">研究工作流可用</span>
+        <span class="status">链上索引可用</span>
+        <span class="status">工件归档可用</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>使用提示</h2>
+      <ul>
+        <li>审计任务适合输入本地 Solidity 文件、协议目录，或后续接入的链上地址。</li>
+        <li>研究任务现在优先按“历史攻击事件 ID”运行，系统会先同步链上证据，再决定是否允许生成可靠研究稿。</li>
+        <li>只有证据门禁通过，系统才会进入最终研究稿生成；证据不齐时会明确阻断，而不是凑结果。</li>
+        <li>建议勾选“保存工件”，这样每次运行都会生成可回看、可验收的归档目录。</li>
+        <li>“历史工件”支持直接打开详情页，也支持在首页预览 Markdown 与 JSON 工件。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>提交审计任务</h2>
+      <div class="field">
+        <label for="audit-target">目标路径</label>
+        <input id="audit-target" value="contracts/curve">
+      </div>
+      <div class="field">
+        <label for="audit-analyzers">分析器</label>
+        <input id="audit-analyzers" value="">
+      </div>
+      <div class="field">
+        <label for="audit-severity">最小严重性</label>
+        <select id="audit-severity">
+          <option>Informational</option>
+          <option>Low</option>
+          <option>Medium</option>
+          <option>High</option>
+          <option>Critical</option>
+        </select>
+      </div>
+      <div class="field">
+        <label><input id="audit-save" type="checkbox" checked> 保存工件</label>
+      </div>
+      <button id="audit-submit" type="button">运行审计</button>
+    </div>
+
+    <div class="card">
+      <h2>攻击事件研究</h2>
+      <p class="muted">
+        主入口。优先填写历史攻击事件 ID，让系统先做链上证据同步、验证和研究门禁，再生成研究产物。
+      </p>
+      <div class="field">
+        <label for="research-incident-id">历史攻击事件 ID（优先）</label>
+        <input id="research-incident-id" value="morpho_blue_oracle_misconfig_2024">
+      </div>
+      <div class="field">
+        <label for="research-candidate-id">外部发现候选 ID（自动回填）</label>
+        <input id="research-candidate-id" value="" placeholder="点击下方发现结果里的“用此事件跑研究”后自动填充">
+      </div>
+      <div class="field">
+        <label for="research-target">目标路径（仅高级模式 / 可选）</label>
+        <input id="research-target" value="" placeholder="只有做自定义协议研究时才填写，例如 contracts/curve">
+      </div>
+      <div class="field">
+        <label for="research-analyzers">分析器（仅高级模式）</label>
+        <input id="research-analyzers" value="" placeholder="incident-first 模式通常不需要手填">
+      </div>
+      <div class="field">
+        <label for="research-severity">最小严重性</label>
+        <select id="research-severity">
+          <option>Informational</option>
+          <option>Low</option>
+          <option>Medium</option>
+          <option>High</option>
+          <option>Critical</option>
+        </select>
+      </div>
+      <div class="field">
+        <label><input id="research-save" type="checkbox"> 保存工件</label>
+      </div>
+      <button id="research-submit" class="secondary" type="button">运行攻击事件研究</button>
+      <p class="muted section-gap-sm">
+        推荐先试：`morpho_blue_oracle_misconfig_2024`、`curve_reentrancy_2023`、`compound_governance_bug_2021`
+      </p>
+    </div>
+  </section>
+
+  <section class="grid section-gap">
+    <div class="card">
+      <h2>深分析</h2>
+      <div class="field">
+        <label for="deep-target">目标路径或地址</label>
+        <input id="deep-target" value="tests/fixtures/CrossContractFlowPrototype.sol">
+      </div>
+      <button id="deep-submit" type="button">运行深分析</button>
+    </div>
+    <div class="card">
+      <h2>深分析结果摘要</h2>
+      <div id="deep-analysis-list" class="list"></div>
+    </div>
+  </section>
+
+  <section class="grid section-gap">
+    <div class="card">
+      <h2>最新任务结果</h2>
+      <div id="result-viewer" class="result-block" aria-live="polite">
+        <div class="muted">等待任务运行...</div>
+      </div>
+      <details class="section-gap-sm">
+        <summary>原始响应</summary>
+        <pre id="result-raw"></pre>
+      </details>
+    </div>
+    <div class="card">
+      <h2>历史工件</h2>
+      <div class="toolbar">
+        <button id="artifact-refresh" type="button">刷新列表</button>
+      </div>
+      <div id="artifact-list" class="list section-gap-sm"></div>
+    </div>
+  </section>
+
+  <section class="grid section-gap">
+    <div class="card">
+      <h2>工件文件预览</h2>
+      <div id="artifact-preview" class="result-block">
+        <div class="muted">点击“预览工件”后，这里会显示 Markdown、JSON 或研究产物文件。</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid section-gap">
+    <div class="card">
+      <h2>链上监控</h2>
+      <div class="field">
+        <label for="monitor-mode">模式</label>
+        <select id="monitor-mode">
+          <option value="cycle">cycle</option>
+          <option value="recent">recent</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="monitor-block-count">最近扫描区块数</label>
+        <input id="monitor-block-count" value="3">
+      </div>
+      <div class="field">
+        <label><input id="monitor-save-db" type="checkbox" checked> 保存到数据库</label>
+      </div>
+      <button id="monitor-submit" type="button">运行监控扫描</button>
+    </div>
+    <div class="card">
+      <h2>最近发现的链上合约</h2>
+      <div class="toolbar">
+        <button id="discovery-refresh" type="button">刷新列表</button>
+        <button id="indexer-refresh" type="button">索引状态</button>
+      </div>
+      <div id="discovery-list" class="list section-gap-sm"></div>
+    </div>
+  </section>
+
+  <section class="grid section-gap">
+    <div class="card">
+      <h2>索引器状态</h2>
+      <div id="indexer-status" class="list"></div>
+    </div>
+    <div class="card">
+      <h2>最近索引运行</h2>
+      <div id="index-run-list" class="list"></div>
+    </div>
+  </section>
+
+  <section class="grid section-gap grid-triple">
+    <div class="card">
+      <h2>最近索引区块</h2>
+      <div id="indexed-block-list" class="list"></div>
+    </div>
+    <div class="card">
+      <h2>最近索引交易</h2>
+      <div id="indexed-transaction-list" class="list"></div>
+    </div>
+    <div class="card">
+      <h2>最近索引日志</h2>
+      <div id="indexed-log-list" class="list"></div>
+    </div>
+  </section>
+
+  <section class="grid section-gap">
+    <div class="card">
+      <h2>外部事件发现</h2>
+      <p class="muted">
+        从 SlowMist 最新事件页发现候选攻击事件。优先挑高相关性事件，再复制事件 ID 到上方研究入口。
+      </p>
+      <div class="field">
+        <label for="discover-limit">发现数量</label>
+        <input id="discover-limit" value="10">
+      </div>
+      <button id="incident-discover-submit" type="button">发现最新事件</button>
+    </div>
+    <div class="card">
+      <h2>发现结果</h2>
+      <div id="incident-discovery-list" class="list"></div>
+    </div>
+  </section>
+
+  <section class="grid section-gap">
+    <div class="card">
+      <h2>历史案例搜索</h2>
+      <div class="field">
+        <label for="incident-query">关键词</label>
+        <input id="incident-query" value="reentrancy">
+      </div>
+      <button id="incident-submit" type="button">搜索案例</button>
+      <div class="field section-gap-sm">
+        <label for="incident-hydrate-id">富化案例 ID（可选）</label>
+        <input id="incident-hydrate-id" value="">
+      </div>
+      <button id="incident-hydrate-submit" type="button">同步链上证据</button>
+    </div>
+    <div class="card">
+      <h2>案例搜索结果</h2>
+      <div id="incident-list" class="list"></div>
+    </div>
+  </section>
+</div>
