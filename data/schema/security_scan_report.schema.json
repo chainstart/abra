@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeFi Security Scan Report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "tool",
+    "target",
+    "stats",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "tool": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "phase"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "path",
+        "kind",
+        "analyzers_requested",
+        "minimum_severity"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "analyzers_requested": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minimum_severity": {
+          "type": "string"
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": [
+        "files_scanned",
+        "analyzers_run",
+        "total_findings",
+        "elapsed_seconds",
+        "by_severity",
+        "by_analyzer"
+      ],
+      "properties": {
+        "files_scanned": {
+          "type": "integer"
+        },
+        "analyzers_run": {
+          "type": "integer"
+        },
+        "total_findings": {
+          "type": "integer"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "by_severity": {
+          "type": "object"
+        },
+        "by_analyzer": {
+          "type": "object"
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "finding_id",
+          "analyzer",
+          "title",
+          "severity",
+          "description",
+          "recommendation",
+          "file",
+          "line",
+          "affected_scope",
+          "supporting_evidence",
+          "verification_status"
+        ],
+        "properties": {
+          "finding_id": {
+            "type": "string"
+          },
+          "analyzer": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "code_snippet": {
+            "type": "string"
+          },
+          "verification_status": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "affected_scope": {
+            "type": "object",
+            "required": [
+              "file_path",
+              "line_start",
+              "line_end"
+            ],
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "line_start": {
+                "type": "integer"
+              },
+              "line_end": {
+                "type": "integer"
+              }
+            }
+          },
+          "supporting_evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "evidence_id",
+                "source_type",
+                "source_ref",
+                "content_summary",
+                "raw_pointer",
+                "confidence",
+                "derived_by",
+                "reproducible",
+                "code_snippet"
+              ],
+              "properties": {
+                "evidence_id": {
+                  "type": "string"
+                },
+                "source_type": {
+                  "type": "string"
+                },
+                "source_ref": {
+                  "type": "string"
+                },
+                "content_summary": {
+                  "type": "string"
+                },
+                "raw_pointer": {
+                  "type": "string"
+                },
+                "confidence": {
+                  "type": "string"
+                },
+                "derived_by": {
+                  "type": "string"
+                },
+                "reproducible": {
+                  "type": "boolean"
+                },
+                "code_snippet": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

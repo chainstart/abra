@@ -465,7 +465,7 @@ contract UniswapV4PoolManager {
     /**
      * @notice Pay tokens to the PoolManager (when delta is positive = caller owes PM).
      * @param currency Token to settle
-     * @param amount Amount to settle
+     * @return paid Amount of tokens credited to the caller's settlement
      *
      * @dev Caller must have already transferred tokens to this contract.
      *      settle() checks the balance increase to credit the caller.
