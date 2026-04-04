@@ -1,4 +1,3 @@
-from __future__ import annotations
 #!/usr/bin/env python3
 """Unified smart contract security scanner.
 
@@ -26,6 +25,16 @@ import sys
 import time
 from pathlib import Path
 
+# 这里显式补齐导入路径，保证两种运行方式都稳定：
+# 1. `python tools/scanner.py`
+# 2. `import tools.scanner`
+CURRENT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = CURRENT_DIR.parent
+for candidate in (REPO_ROOT, CURRENT_DIR):
+    candidate_str = str(candidate)
+    if candidate_str not in sys.path:
+        sys.path.insert(0, candidate_str)
+
 try:
     from rich.console import Console
     from rich.table import Table
@@ -36,12 +45,13 @@ try:
 except ImportError:
     RICH_AVAILABLE = False
 
-from analyzers.base import Finding, Severity
-from analyzers.access_control import AccessControlAnalyzer
-from analyzers.reentrancy import ReentrancyAnalyzer
-from analyzers.oracle_dependency import OracleDependencyAnalyzer
-from analyzers.arithmetic import ArithmeticAnalyzer
-from analyzers.upgrade_safety import UpgradeSafetyAnalyzer
+from tools.analyzers.base import Finding, Severity
+from tools.analyzers.access_control import AccessControlAnalyzer
+from tools.analyzers.reentrancy import ReentrancyAnalyzer
+from tools.analyzers.oracle_dependency import OracleDependencyAnalyzer
+from tools.analyzers.arithmetic import ArithmeticAnalyzer
+from tools.analyzers.upgrade_safety import UpgradeSafetyAnalyzer
+from services.shared.models import ScanReport
 
 # Registry of all available analyzers
 ANALYZER_REGISTRY = {
@@ -68,6 +78,25 @@ SEVERITY_COLORS = {
     Severity.LOW: "cyan",
     Severity.INFO: "dim",
 }
+
+
+def resolve_analyzer_names(analyzer_names: list[str] | None = None) -> list[str]:
+    """把输入的分析器列表规整成实际可执行的名称列表。"""
+
+    if not analyzer_names:
+        return list(ANALYZER_REGISTRY.keys())
+
+    resolved: list[str] = []
+    for name in analyzer_names:
+        normalized = name.strip()
+        if normalized in ANALYZER_REGISTRY:
+            resolved.append(normalized)
+        else:
+            print(
+                f"Warning: Unknown analyzer '{normalized}', skipping.",
+                file=sys.stderr,
+            )
+    return resolved
 
 
 def discover_sol_files(target: str) -> list[str]:
@@ -113,17 +142,9 @@ def run_scan(
         print(f"No .sol files found at: {target}", file=sys.stderr)
         return [], {}
 
-    # Determine which analyzers to run
-    if analyzer_names:
-        analyzers = []
-        for name in analyzer_names:
-            name = name.strip()
-            if name in ANALYZER_REGISTRY:
-                analyzers.append(ANALYZER_REGISTRY[name]())
-            else:
-                print(f"Warning: Unknown analyzer '{name}', skipping.", file=sys.stderr)
-    else:
-        analyzers = [cls() for cls in ANALYZER_REGISTRY.values()]
+    # 先统一分析器名称，再实例化，避免 CLI 和内部调用出现两套逻辑。
+    resolved_analyzer_names = resolve_analyzer_names(analyzer_names)
+    analyzers = [ANALYZER_REGISTRY[name]() for name in resolved_analyzer_names]
 
     if not analyzers:
         print("No valid analyzers selected.", file=sys.stderr)
@@ -175,6 +196,25 @@ def run_scan(
             stats["by_analyzer"][analyzer.name] = count
 
     return filtered, stats
+
+
+def build_scan_report(
+    *,
+    target: str,
+    analyzer_names: list[str] | None,
+    min_severity: Severity,
+    findings: list[Finding],
+    stats: dict,
+) -> ScanReport:
+    """把旧扫描结果包装成统一输出对象。"""
+
+    return ScanReport.from_legacy_scan(
+        target=target,
+        analyzer_names=resolve_analyzer_names(analyzer_names),
+        minimum_severity=min_severity.value,
+        findings=findings,
+        stats=stats,
+    )
 
 
 def output_console(findings: list[Finding], stats: dict) -> None:
@@ -291,22 +331,17 @@ def _output_console_plain(findings: list[Finding], stats: dict) -> None:
     print(f"\nTotal: {len(findings)} findings")
 
 
-def output_json(findings: list[Finding], stats: dict, output_file: str | None = None) -> str:
-    """Serialize findings and stats to JSON.
+def output_json(report: ScanReport, output_file: str | None = None) -> str:
+    """把统一扫描结果序列化为 JSON。
 
     Args:
-        findings: List of findings.
-        stats: Scan statistics dict.
+        report: 统一扫描结果对象。
         output_file: Optional path to write JSON output.
 
     Returns:
         JSON string.
     """
-    data = {
-        "stats": stats,
-        "findings": [f.to_dict() for f in findings],
-    }
-    json_str = json.dumps(data, indent=2, ensure_ascii=False)
+    json_str = report.to_json(indent=2)
 
     if output_file:
         Path(output_file).parent.mkdir(parents=True, exist_ok=True)
@@ -459,12 +494,19 @@ def main() -> None:
         analyzer_names=analyzer_names,
         min_severity=args.severity,
     )
+    report = build_scan_report(
+        target=args.target,
+        analyzer_names=analyzer_names,
+        min_severity=args.severity,
+        findings=findings,
+        stats=stats,
+    )
 
     # Output results
     if args.output == "console":
         output_console(findings, stats)
     elif args.output == "json":
-        json_str = output_json(findings, stats, args.output_file)
+        json_str = output_json(report, args.output_file)
         if not args.output_file:
             print(json_str)
     elif args.output == "markdown":
