@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: 运行 Python 单元测试
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: 扫描器冒烟测试
+        run: |
+          python tools/scanner.py --target contracts/ --output json --output-file /tmp/scan.json || true
+          python tools/report_generator.py --input /tmp/scan.json --protocol-name "CI Smoke Test" --output /tmp/report.md
+
+      - name: Phase 1 审计 MVP 冒烟测试
+        run: |
+          python -m services.analysis.audit_cli \
+            --target tests/fixtures/LendingPoolPrototype.sol \
+            --analyzers access-control,reentrancy \
+            --output /tmp/phase1-audit.md \
+            --json-output /tmp/phase1-audit.json
+
+      - name: Phase 4 研究工作流冒烟测试
+        run: |
+          python -m services.research.research_cli \
+            --target contracts/curve \
+            --analyzers reentrancy \
+            --memo-output /tmp/research-memo.json \
+            --paper-output /tmp/research-paper.md
+
+      - name: Benchmark 冒烟测试
+        run: |
+          python scripts/run_benchmark_suite.py
+
+      - name: 产品 HTTP 服务冒烟测试
+        run: |
+          python -m services.api.server &
+          SERVER_PID=$!
+          sleep 1
+          python - <<'PY'
+          import json
+          from urllib import request
+          with request.urlopen("http://127.0.0.1:8000/health") as response:
+              payload = json.loads(response.read().decode("utf-8"))
+          assert payload["status"] == "ok"
+          PY
+          kill $SERVER_PID
+
+      - name: 安装 Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: 运行 Foundry 测试
+        run: |
+          forge test -vv
