@@ -1,0 +1,87 @@
+{
+  "incident_id": "compound_governance_bug_2021",
+  "title": "Compound 治理升级导致错误奖励发放",
+  "protocol_name": "Compound",
+  "protocol_type": "governance",
+  "year": 2021,
+  "summary": "治理提案上线后引入错误逻辑，导致 COMP 奖励异常发放并造成重大损失。",
+  "root_cause": "治理升级流程缺少足够的回归验证和上线前保护。",
+  "attack_patterns": [
+    "governance risk",
+    "upgrade bug",
+    "reward accounting failure"
+  ],
+  "affected_categories": [
+    "SC-09: Governance",
+    "SC-08: Upgrade Safety"
+  ],
+  "keywords": [
+    "governance",
+    "proposal",
+    "upgrade",
+    "reward",
+    "accounting"
+  ],
+  "source_reports": [
+    "reports/05_compound_audit.md"
+  ],
+  "chain": "ethereum",
+  "loss": {
+    "estimated_usd": "~$80M in excess COMP distributed",
+    "notes": "仓库报告明确将 2021-09-30 的 COMP distribution bug 归因于治理提案 062/063 上线后的逻辑错误。"
+  },
+  "attack_transactions": [
+    {
+      "tx_hash": "0xf4bfef1655f2092cf062c008153a5be66069b2b1fedcacbf4037c1f3cc8a9f45",
+      "role": "execution",
+      "label": "Proposal 62 执行交易",
+      "description": "治理提案 62 执行后将错误的 COMP 分发逻辑上线，引发异常奖励发放。"
+    }
+  ],
+  "affected_components": [
+    {
+      "reference": "Comptroller::distributeBorrowerComp",
+      "label": "借款人奖励分发逻辑",
+      "role": "reward_accounting",
+      "entity_type": "contract",
+      "description": "治理升级后引入的错误分发逻辑。"
+    },
+    {
+      "reference": "GovernorBravo",
+      "label": "Governor Bravo 治理流程",
+      "role": "governance",
+      "entity_type": "contract",
+      "description": "问题通过治理提案上线，暴露出治理升级前验证不足。"
+    }
+  ],
+  "key_entities": [
+    {
+      "reference": "Proposal 062",
+      "label": "治理提案 062",
+      "role": "proposal",
+      "entity_type": "governance_artifact",
+      "description": "首次引入 COMP 分发逻辑错误的治理提案。"
+    },
+    {
+      "reference": "Proposal 063",
+      "label": "治理提案 063",
+      "role": "proposal",
+      "entity_type": "governance_artifact",
+      "description": "修复尝试未能立即止损，反而放大了影响。"
+    }
+  ],
+  "timeline": [
+    {
+      "title": "治理提案上线奖励逻辑变更",
+      "description": "治理提案 062 上线后，Comptroller 的奖励分发逻辑被修改。"
+    },
+    {
+      "title": "错误奖励开始异常发放",
+      "description": "协议向非预期地址额外分发大量 COMP，造成重大资产外流。"
+    },
+    {
+      "title": "后续修复提案未能立即止损",
+      "description": "治理提案 063 尝试修复，但由于治理流程和 timelock 延迟，错误分发持续了数日。"
+    }
+  ]
+}

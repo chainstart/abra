@@ -1,0 +1,80 @@
+{
+  "incident_id": "curve_reentrancy_2023",
+  "title": "Curve Vyper 重入事件",
+  "protocol_name": "Curve",
+  "protocol_type": "amm",
+  "year": 2023,
+  "summary": "攻击者利用 Vyper 编译器相关问题和外部调用时序，实现对流动性池的重入利用。",
+  "root_cause": "外部调用与状态更新之间的顺序问题，使回调路径可被重入利用。",
+  "attack_patterns": [
+    "reentrancy",
+    "callback abuse",
+    "liquidity pool drain"
+  ],
+  "affected_categories": [
+    "SC-01: Reentrancy"
+  ],
+  "keywords": [
+    "reentrancy",
+    "callback",
+    "swap",
+    "pool",
+    "liquidity"
+  ],
+  "source_reports": [
+    "reports/04_curve_audit.md",
+    "reports/07_real_hack_analysis_2026.md"
+  ],
+  "chain": "ethereum",
+  "loss": {
+    "estimated_usd": "multi-pool impact",
+    "notes": "仓库报告将其描述为 2023 年 7 月 Curve Vyper 池重入事件，影响多个池子与下游集成。"
+  },
+  "attack_transactions": [
+    {
+      "tx_hash": "0x136f7ccd916a7e8319a40652fe2bf3253d48a5a4dcc8131ba40902ef4624ce8e",
+      "role": "exploit",
+      "label": "alETH/ETH 池重入利用交易",
+      "description": "受 Vyper 编译器漏洞影响的 Curve 池被攻击者重入利用，抽走池中资产。"
+    }
+  ],
+  "affected_components": [
+    {
+      "reference": "Vyper pools with broken @nonreentrant lock",
+      "label": "受影响的 Vyper 池实现",
+      "role": "pool",
+      "entity_type": "contract",
+      "description": "编译器级别的 nonreentrant 锁失效，使重入成为现实攻击面。"
+    },
+    {
+      "reference": "Curve view pricing functions",
+      "label": "只读价格函数",
+      "role": "oracle_surface",
+      "entity_type": "contract",
+      "description": "下游协议在错误时序窗口读取池子状态，可能获得不一致价格。"
+    }
+  ],
+  "key_entities": [
+    {
+      "reference": "downstream integrators",
+      "label": "下游集成协议",
+      "role": "victim",
+      "entity_type": "integration",
+      "description": "使用 Curve 池视图函数或 LP 价格作为 Oracle 输入的协议。"
+    }
+  ],
+  "timeline": [
+    {
+      "title": "受影响池以脆弱编译器版本部署",
+      "description": "部分 Curve 池使用的 Vyper 编译器导致 `@nonreentrant` 保护失效。"
+    },
+    {
+      "title": "攻击者触发回调重入窗口",
+      "description": "攻击者利用外部调用时序和重入窗口操纵池子内部状态。"
+    },
+    {
+      "title": "错误状态传播到下游集成",
+      "description": "依赖池子价格视图函数的协议可能在不一致状态下读取错误价格或份额信息。"
+    }
+  ]
+}
