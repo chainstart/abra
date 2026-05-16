@@ -1,0 +1,105 @@
+{
+  "incident_id": "morpho_blue_oracle_misconfig_2024",
+  "title": "Morpho Blue 恶意或错误 Oracle 市场利用模式",
+  "protocol_name": "Morpho Blue",
+  "protocol_type": "lending",
+  "year": 2024,
+  "summary": "攻击者通过创建使用错误 Oracle 的借贷市场，使极少量抵押品被错误高估，从而借走大额资产。",
+  "root_cause": "permissionless 市场创建缺少对 Oracle 有效性和价格合理性的约束。",
+  "attack_patterns": [
+    "misconfigured oracle",
+    "permissionless market creation",
+    "undercollateralized borrowing"
+  ],
+  "affected_categories": [
+    "SC-03: Oracle Manipulation",
+    "SC-02: Access Control"
+  ],
+  "keywords": [
+    "oracle",
+    "price",
+    "borrow",
+    "lending",
+    "market",
+    "collateral"
+  ],
+  "source_reports": [
+    "reports/09_morpho_blue_oracle_deep_audit.md",
+    "reports/10_morpho_blue_onchain_attack_verification.md"
+  ],
+  "chain": "ethereum",
+  "loss": {
+    "estimated_usd": "~$230,000",
+    "notes": "报告明确指出该损失来自 PAXG/USDC 市场的 Oracle decimals 配置错误。"
+  },
+  "attack_transactions": [
+    {
+      "tx_hash": "0x256979ae169abb7fbbbbc14188742f4b9debf48b48ad5b5207cadcc99ccb493b",
+      "role": "exploit",
+      "label": "PAXG/USDC 市场借贷利用交易",
+      "description": "攻击者利用错误 SCALE_FACTOR 的市场健康度检查，以极少抵押品借出大量 USDC。",
+      "labels": [
+        "oracle misconfiguration",
+        "undercollateralized borrow"
+      ]
+    }
+  ],
+  "key_entities": [
+    {
+      "reference": "0x02DBe46169fDf6555F2A125eEe3dce49703b13f5",
+      "label": "攻击者地址",
+      "role": "attacker",
+      "entity_type": "address",
+      "description": "报告中给出的 PAXG/USDC 攻击地址。"
+    }
+  ],
+  "affected_components": [
+    {
+      "reference": "Morpho.sol::createMarket",
+      "label": "Morpho 市场创建逻辑",
+      "role": "market_creation",
+      "entity_type": "contract",
+      "description": "只校验 IRM 和 LLTV 白名单，不校验 Oracle 有效性。"
+    },
+    {
+      "reference": "Morpho.sol::_isHealthy",
+      "label": "健康度检查逻辑",
+      "role": "risk_check",
+      "entity_type": "contract",
+      "description": "直接消费 Oracle 价格，错误价格会被放大到借贷约束。"
+    },
+    {
+      "reference": "MorphoChainlinkOracleV2",
+      "label": "MorphoChainlinkOracleV2",
+      "role": "oracle",
+      "entity_type": "contract",
+      "description": "错误 decimals 输入会导致 SCALE_FACTOR 偏差。"
+    }
+  ],
+  "timeline": [
+    {
+      "title": "错误 Oracle 市场被创建",
+      "description": "市场创建者为 PAXG/USDC 市场配置了错误的 token decimals，导致 Oracle SCALE_FACTOR 偏差 10^12。"
+    },
+    {
+      "title": "攻击者存入极少量抵押品",
+      "description": "攻击者以被严重高估的 PAXG 作为抵押品，使 `_isHealthy()` 误判为高度健康。",
+      "tx_hashes": [
+        "0x256979ae169abb7fbbbbc14188742f4b9debf48b48ad5b5207cadcc99ccb493b"
+      ]
+    },
+    {
+      "title": "错误借贷约束放行大额借款",
+      "description": "在错误价格输入下，攻击者借出约 23 万美元 USDC，形成严重欠抵押头寸。",
+      "tx_hashes": [
+        "0x256979ae169abb7fbbbbc14188742f4b9debf48b48ad5b5207cadcc99ccb493b"
+      ]
+    }
+  ],
+  "local_verification": {
+    "kind": "forge_test",
+    "match_path": "contracts/MorphoOracleAttack.t.sol",
+    "description": "主网 fork 上验证 createMarket 零验证和欠抵押借款利用路径。",
+    "success_summary": "Morpho Oracle 攻击 PoC 已在本地主网 fork 上验证通过。"
+  }
+}

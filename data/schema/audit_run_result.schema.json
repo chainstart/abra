@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeFi Audit Run Result",
+  "type": "object",
+  "required": [
+    "ingestion",
+    "classification",
+    "scan_report",
+    "evidence_summary",
+    "audit_summary",
+    "related_incidents"
+  ],
+  "properties": {
+    "ingestion": {
+      "type": "object",
+      "required": [
+        "target_path",
+        "target_kind",
+        "source_files",
+        "solidity_file_count",
+        "total_line_count"
+      ]
+    },
+    "classification": {
+      "type": "object",
+      "required": [
+        "protocol_name",
+        "protocol_type",
+        "confidence",
+        "rationale",
+        "dominant_signals"
+      ]
+    },
+    "scan_report": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "generated_at",
+        "tool",
+        "target",
+        "stats",
+        "findings"
+      ]
+    },
+    "evidence_summary": {
+      "type": "object",
+      "required": [
+        "evidence_count",
+        "reproducible_count",
+        "source_type_breakdown",
+        "analyzer_breakdown"
+      ]
+    },
+    "audit_summary": {
+      "type": "object",
+      "required": [
+        "total_findings",
+        "critical_count",
+        "high_count",
+        "medium_count",
+        "low_count",
+        "informational_count",
+        "top_findings"
+      ]
+    },
+    "related_incidents": {
+      "type": "array"
+    }
+  }
+}

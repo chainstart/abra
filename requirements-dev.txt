@@ -1,0 +1,7 @@
+-r tools/requirements.txt
+jsonschema>=4.21
+solidity-parser>=0.1.1
+sqlalchemy>=2.0
+psycopg[binary]>=3.3
+pytest>=8.0
+ruff>=0.8.0
