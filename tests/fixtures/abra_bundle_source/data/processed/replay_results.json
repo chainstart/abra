@@ -1,0 +1,40 @@
+[
+  {
+    "incident": "Fixture Euler",
+    "slug": "fixture-euler",
+    "chain": "ethereum",
+    "rpc_env": "ETH_RPC_URL",
+    "attack_family": "flash_loan",
+    "loss_usd": 1000000,
+    "fork_block": 16817995,
+    "test_path": "test/replay/FixtureEulerReplay.t.sol",
+    "replay_test": "test_FixtureEulerReplay",
+    "status": "verified",
+    "metadata_status": "passed",
+    "command": "forge test --match-path test/replay/FixtureEulerReplay.t.sol --match-test test_FixtureEulerReplay -vv",
+    "returncode": 0,
+    "duration_seconds": 0.25,
+    "log_path": "reports/replay_runs/fixture/fixture-euler.replay.log",
+    "blocker": "",
+    "verified": true
+  },
+  {
+    "incident": "Fixture Blocked",
+    "slug": "fixture-blocked",
+    "chain": "polygon",
+    "rpc_env": "POLYGON_RPC_URL",
+    "attack_family": "oracle_manipulation",
+    "loss_usd": 250000,
+    "fork_block": 38792977,
+    "test_path": "test/replay/FixtureBlockedReplay.t.sol",
+    "replay_test": "test_FixtureBlockedReplay",
+    "status": "failed",
+    "metadata_status": "passed",
+    "command": "forge test --match-path test/replay/FixtureBlockedReplay.t.sol --match-test test_FixtureBlockedReplay -vv",
+    "returncode": 1,
+    "duration_seconds": 0.5,
+    "log_path": "reports/replay_runs/fixture/fixture-blocked.replay.log",
+    "blocker": "archive_state_unavailable",
+    "verified": false
+  }
+]

@@ -1,0 +1,27 @@
+{
+  "stats": {
+    "files_scanned": 1,
+    "analyzers_run": 1,
+    "total_findings": 1,
+    "elapsed_seconds": 0.01,
+    "by_severity": {
+      "High": 1
+    },
+    "by_analyzer": {
+      "oracle-dependency": 1
+    }
+  },
+  "findings": [
+    {
+      "analyzer": "oracle-dependency",
+      "title": "Price feed lacks staleness guard",
+      "severity": "High",
+      "file": "contracts/aave/Pool.sol",
+      "line": 42,
+      "description": "The fixture oracle path does not check freshness before liquidation.",
+      "recommendation": "Require maxAge checks before using the price.",
+      "code_snippet": "price = oracle.latestAnswer();",
+      "category": "SC-03: Oracle Manipulation"
+    }
+  ]
+}

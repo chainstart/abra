@@ -1,0 +1,3 @@
+incident,slug,chain,status,has_replay_test,rpc_configured,metadata_passed,needs_archive_rpc,needs_replay_logic,needs_non_evm_harness,verified,blocker
+Fixture Euler,fixture-euler,ethereum,verified,True,True,True,False,False,False,True,
+Fixture Blocked,fixture-blocked,polygon,failed,True,True,True,True,False,False,False,archive_state_unavailable

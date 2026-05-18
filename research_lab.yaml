@@ -1,0 +1,116 @@
+schema_version: ara.research_lab.v1
+lab_id: abra
+system_name: ABRA
+full_name: Automated Blockchain Research Agents
+domain: blockchain_security
+description: Agentic blockchain security research lab for static analysis, incident replay, evidence review, and paper-ready reporting.
+
+legacy:
+  repo_names:
+    - blockchain-security
+  lab_ids:
+    - blockchain-security
+    - blockchain_security
+
+entrypoints:
+  agent_cli:
+    - python3 -m abra
+  direct_tools:
+    - python3 tools/scanner.py
+    - python3 tools/replay_runner.py
+    - python3 tools/pipeline/run_phase1.py
+
+commands:
+  allow_prefixes:
+    - python3 -m abra
+    - abra
+    - python3 tools/
+    - python3 scanner.py
+    - python3 tools/scanner.py
+    - python3 tools/replay_runner.py
+    - forge test --match-path test/replay/
+    - forge test --match-contract
+  deny_patterns:
+    - rm -rf
+    - git reset --hard
+    - cast send
+    - --broadcast
+    - PRIVATE_KEY
+
+dispatch:
+  commands:
+    manifest-inspect:
+      argv:
+        - python3
+        - -m
+        - abra
+        - labs
+        - inspect
+        - --json
+      side_effect_free: true
+      description: Inspect the ABRA research_lab.yaml contract.
+    smoke:
+      argv:
+        - python3
+        - -m
+        - abra
+        - labs
+        - smoke
+        - --json
+      side_effect_free: true
+      description: Run side-effect-free ABRA manifest and artifact smoke checks.
+    tools-list:
+      argv:
+        - python3
+        - -m
+        - abra
+        - tools
+        - list
+        - --json
+      side_effect_free: true
+      description: List ABRA's preserved domain tools.
+
+environment:
+  required: []
+  optional:
+    - ETH_RPC_URL
+    - POLYGON_RPC_URL
+    - ARCHIVE_RPC_URL
+    - FOUNDRY_PROFILE
+
+artifacts:
+  include:
+    - runs/*/evidence_bundle.json
+    - runs/*/artifact_manifest.json
+    - runs/*/final_report.md
+    - runs/*/abra_result_bundle/**
+    - data/processed/*.csv
+    - data/processed/*.json
+    - reports/*.md
+    - reports/events/*.md
+    - reports/replay_runs/*.json
+    - findings/*.md
+    - figures/generated/*
+  exclude:
+    - .venv/**
+    - out/**
+    - cache/**
+
+bundles:
+  produced:
+    - evidence_bundle
+    - abra_result_bundle
+
+evidence_levels:
+  L0: hypothesis
+  L1: static_alert
+  L2: source_confirmed
+  L3: local_reproduced
+  L4: fork_replayed
+  L5: externally_correlated
+  L6: audit_ready
+
+safety:
+  max_wall_time_minutes: 240
+  network_policy: read_only_rpc
+  destructive_commands: false

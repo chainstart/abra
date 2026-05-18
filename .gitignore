@@ -3,7 +3,10 @@ __pycache__/
 *.pyo
 .env
 .venv/
+cache/
+reports/replay_runs/
 *.json
+!tests/fixtures/**/*.json
 !/contracts/**
 data/raw/*
 !data/raw/.gitkeep

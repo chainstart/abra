@@ -1,0 +1,86 @@
+{
+  "schema_version": "abra.replay_case_fixture.v1",
+  "fixture_id": "abra-replay-agent-mvp",
+  "description": "Bounded replay feasibility fixture for ABRA replay evidence agent tests.",
+  "cases": [
+    {
+      "incident": "Fixture Euler",
+      "slug": "fixture-euler",
+      "chain": "ethereum",
+      "rpc_env": "ETH_RPC_URL",
+      "attack_family": "flash_loan",
+      "loss_usd": 1000000,
+      "fork_block": 16817995,
+      "test_path": "test/replay/FixtureEulerReplay.t.sol",
+      "metadata_test": "test_FixtureEulerReplayMetadata",
+      "replay_test": "test_FixtureEulerReplay",
+      "environment": {
+        "ETH_RPC_URL": true
+      },
+      "fixture_result": {
+        "status": "verified",
+        "metadata_status": "passed",
+        "command": "forge test --match-path test/replay/FixtureEulerReplay.t.sol --match-test test_FixtureEulerReplay -vv",
+        "returncode": 0,
+        "duration_seconds": 0.25,
+        "blocker": "",
+        "verified": true,
+        "log_text": "[PASS] test_FixtureEulerReplay() (gas: 123456)"
+      }
+    },
+    {
+      "incident": "Fixture Archive Blocked",
+      "slug": "fixture-archive-blocked",
+      "chain": "polygon",
+      "rpc_env": "POLYGON_RPC_URL",
+      "attack_family": "oracle_manipulation",
+      "loss_usd": 250000,
+      "fork_block": 38792977,
+      "test_path": "test/replay/FixtureArchiveBlockedReplay.t.sol",
+      "metadata_test": "test_FixtureArchiveBlockedMetadata",
+      "replay_test": "test_FixtureArchiveBlockedReplay",
+      "environment": {
+        "POLYGON_RPC_URL": true
+      },
+      "fixture_result": {
+        "status": "failed",
+        "metadata_status": "passed",
+        "command": "forge test --match-path test/replay/FixtureArchiveBlockedReplay.t.sol --match-test test_FixtureArchiveBlockedReplay -vv",
+        "returncode": 1,
+        "duration_seconds": 0.5,
+        "verified": false,
+        "log_text": "Error: missing trie node for historical state at requested fork block"
+      }
+    },
+    {
+      "incident": "Fixture Missing RPC",
+      "slug": "fixture-missing-rpc",
+      "chain": "ethereum",
+      "rpc_env": "ETH_RPC_URL",
+      "attack_family": "reentrancy",
+      "loss_usd": 500000,
+      "fork_block": 9899725,
+      "test_path": "test/replay/FixtureMissingRpcReplay.t.sol",
+      "metadata_test": "test_FixtureMissingRpcMetadata",
+      "replay_test": "test_FixtureMissingRpcReplay",
+      "environment": {
+        "ETH_RPC_URL": false
+      }
+    },
+    {
+      "incident": "Fixture Missing Replay Test",
+      "slug": "fixture-missing-test",
+      "chain": "sui",
+      "rpc_env": "SUI_RPC_URL",
+      "attack_family": "contract_bug",
+      "loss_usd": 750000,
+      "fork_block": null,
+      "test_path": null,
+      "metadata_test": null,
+      "replay_test": null,
+      "environment": {
+        "SUI_RPC_URL": false
+      }
+    }
+  ]
+}

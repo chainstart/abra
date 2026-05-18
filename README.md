@@ -1,6 +1,35 @@
-# Blockchain DeFi Security Audit Project
+# ABRA: Automated Blockchain Research Agents
 
-Deep security audit of 5 high-TVL DeFi protocols with custom static analysis tooling.
+ABRA is the ARA ecosystem's blockchain security domain lab. It preserves the
+existing `blockchain-security` static analysis, DeFi incident pipeline, Foundry
+replay, reports, findings, and paper artifacts while adding a small manifest and
+CLI surface for harness-driven inspection.
+
+The historical repository name `blockchain-security` remains supported through
+`research_lab.yaml` legacy aliases.
+
+## ABRA Harness Entry Points
+
+From the repository root:
+
+```bash
+# Inspect the ARA-compatible lab manifest.
+python3 -m abra labs inspect --json
+
+# Run side-effect-free manifest, tool, report, and findings smoke checks.
+python3 -m abra labs smoke --json
+
+# List the preserved blockchain-security domain tools exposed to ABRA.
+python3 -m abra tools list --json
+```
+
+ARA discovers this lab through `research_lab.yaml`, which declares:
+
+- `lab_id: abra`
+- `bundles.produced: abra_result_bundle`
+- safe command prefixes for `python3 -m abra`, existing local tools, and bounded Foundry replay tests
+- deny patterns for destructive shell operations, private-key use, broadcast transactions, and direct chain writes
+- artifact globs that retain reports, event cards, findings, replay outputs, and generated bundles
 
 ## Protocols Audited
 
@@ -107,6 +136,29 @@ python3 tools/pipeline/generate_event_cards.py \
 forge test --match-path test/replay/Phase2Batch1Catalog.t.sol
 forge test --match-path test/replay/EulerFinanceReplay.t.sol
 ```
+
+### Run Replay Verification Matrix
+
+Use the replay runner instead of raw `forge test` when producing paper evidence. It separates
+verified replay from missing RPC, archive-state failures, and missing replay implementations.
+
+```bash
+# Public RPC endpoints can test connectivity, but may not serve old archive state.
+ETH_RPC_URL=https://ethereum.publicnode.com \
+POLYGON_RPC_URL=https://polygon-bor-rpc.publicnode.com \
+python3 tools/replay_runner.py --timeout 300 --verbosity=-vv
+
+# Archive-capable endpoints are required for verified historical replay.
+ETH_RPC_URL=... python3 tools/replay_runner.py --only lendf-me euler-finance
+POLYGON_RPC_URL=... python3 tools/replay_runner.py --only bonqdao-allianceblock
+```
+
+Outputs:
+
+- `data/processed/replay_results.csv`
+- `data/processed/replay_results.json`
+- `data/processed/replay_blocker_matrix.csv`
+- `reports/27_replay_verification_results.md`
 
 ## Audit Framework
 
