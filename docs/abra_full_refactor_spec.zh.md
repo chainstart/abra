@@ -11,7 +11,7 @@
 
 ## 1. 结论
 
-如果目标已经确定为把 `blockchain-security` 升级并更名为 `ABRA`，推荐采用“原仓库内彻底重构，完成后再做物理改名”的方案。
+如果目标已经确定为把 `abra` 升级并更名为 `ABRA`，推荐采用“原仓库内彻底重构，完成后再做物理改名”的方案。
 
 最终目标：
 
@@ -21,7 +21,7 @@
 - Python 包名：`abra`
 - CLI：`abra`
 - 实验室 ID：`abra`
-- 旧名兼容：`blockchain-security`、`blockchain_security`
+- 旧名兼容：`abra`、`blockchain_security`
 
 核心判断：
 
@@ -49,7 +49,7 @@ Short description: Agentic blockchain security research system for static analys
 如果未来要公开发布且特别重视搜索可发现性，可以考虑：
 
 - GitHub 仓库名仍用 `abra`。
-- README、topics、package description 中写清 `blockchain-security`、`DeFi security`、`Foundry replay`。
+- README、topics、package description 中写清 `abra`、`DeFi security`、`Foundry replay`。
 - 如果组织下已经有重名或冲突，再考虑 `abra-blockchain`。
 
 不推荐仓库名使用完整全称：
@@ -72,8 +72,8 @@ automated-blockchain-research-agents
 - 证据分级：区分 hypothesis、static alert、local reproduction、fork replay、audit-ready。
 - 长期记忆：保存 incident、protocol、finding、replay、失败路线和 blocker。
 - 多 agent 分工：scout、static analysis、replay、evidence reviewer、report writer。
-- ARA 集成：输出可被 `auto-research-agent` 消费的 evidence bundle、artifact manifest 和 writing brief。
-- 历史兼容：旧的 `blockchain-security` 路径、项目 artifact 和 ARA 配置不能一次性失效。
+- ARA 集成：输出可被 `ara` 消费的 evidence bundle、artifact manifest 和 writing brief。
+- 历史兼容：旧的 `abra` 路径、项目 artifact 和 ARA 配置不能一次性失效。
 
 ## 4. 当前状态到目标状态
 
@@ -182,12 +182,12 @@ abra/
 ### 5.1 必须统一的新名字
 
 ```text
-blockchain-security -> abra
+abra -> abra
 Blockchain Security -> ABRA 或 Blockchain Security Research
 blockchain_security -> abra
 BlockchainSecurity -> ABRA 或 Abra
-lab_id: blockchain-security -> abra
-repo_name: blockchain-security -> abra
+lab_id: abra -> abra
+repo_name: abra -> abra
 ```
 
 ### 5.2 保留旧名的地方
@@ -206,9 +206,9 @@ repo_name: blockchain-security -> abra
 ```yaml
 lab_id: abra
 legacy_lab_ids:
-  - blockchain-security
+  - abra
 legacy_repo_names:
-  - blockchain-security
+  - abra
 ```
 
 ### 5.3 不建议立即修改的内容
@@ -533,7 +533,7 @@ external_repositories:
   abra:
     path: ../abra
     legacy_paths:
-      - ../blockchain-security
+      - ../abra
     manifest: research_lab.yaml
 ```
 
@@ -552,7 +552,7 @@ research_domain: abra
 ARA 读取时：
 
 1. 优先找 `../abra`。
-2. 找不到则回退 `../blockchain-security`。
+2. 找不到则回退 `../abra`。
 3. 优先读 `research_lab.yaml`。
 4. 旧 config 作为 override 或兼容 fallback。
 
@@ -566,9 +566,9 @@ ARA 读取时：
 lab_id: abra
 name: "ABRA: Automated Blockchain Research Agents"
 legacy_lab_ids:
-  - blockchain-security
+  - abra
 legacy_repo_names:
-  - blockchain-security
+  - abra
 
 commands:
   allow_prefixes:
@@ -732,13 +732,13 @@ runs/bonqdao-feasibility-001/
 
 ### 阶段 6：ARA 兼容迁移
 
-目标：让 `auto-research-agent` 可调用 ABRA。
+目标：让 `ara` 可调用 ABRA。
 
 任务：
 
 - 新增 `research_lab.yaml`。
 - ARA 支持 `../abra` 优先路径。
-- ARA 保留 `../blockchain-security` fallback。
+- ARA 保留 `../abra` fallback。
 - ARA 支持读取 `evidence_bundle.json`。
 - ARA 写作阶段使用 evidence level。
 
@@ -763,7 +763,7 @@ runs/bonqdao-feasibility-001/
 执行：
 
 ```bash
-mv /home/biostar/work/projects/blockchain-security \
+mv /home/biostar/work/projects/abra \
    /home/biostar/work/projects/abra
 ```
 
@@ -793,7 +793,7 @@ forge test --match-path test/replay/*.t.sol
 
 任务：
 
-- 新代码不再使用 `blockchain-security`。
+- 新代码不再使用 `abra`。
 - 新配置不再使用 `blockchain_security`。
 - 旧配置保留 fallback。
 - 历史报告不强行全量改写。
@@ -801,7 +801,7 @@ forge test --match-path test/replay/*.t.sol
 
 验收：
 
-- `rg "blockchain-security|blockchain_security"` 只在 legacy、history、migration 文档中出现。
+- `rg "abra|blockchain_security"` 只在 legacy、history、migration 文档中出现。
 
 ## 16. 回滚方案
 
@@ -818,7 +818,7 @@ forge test --match-path test/replay/*.t.sol
 
 ```bash
 ln -s /home/biostar/work/projects/abra \
-      /home/biostar/work/projects/blockchain-security
+      /home/biostar/work/projects/abra
 ```
 
 或者临时恢复旧目录名。
@@ -859,7 +859,7 @@ forge test --match-path test/replay/Phase2Batch1Catalog.t.sol
 需要覆盖：
 
 - 从 `../abra` 读取 manifest。
-- 从 `../blockchain-security` fallback。
+- 从 `../abra` fallback。
 - 旧 ARA config 可继续运行。
 - 新 ARA config 可调用 ABRA。
 
@@ -902,7 +902,7 @@ agent 只能通过工具注册表调用命令。不能给 LLM 任意 shell 写�
 
 最推荐的实际顺序：
 
-1. 保持当前目录名 `blockchain-security`。
+1. 保持当前目录名 `abra`。
 2. 新增 `abra/` package 和 `pyproject.toml`。
 3. 新增 `research_lab.yaml`。
 4. 包装 replay runner，先做 replay feasibility MVP。

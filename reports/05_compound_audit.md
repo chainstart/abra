@@ -1117,6 +1117,6 @@ This report does not constitute financial advice. Users of the Compound protocol
 ---
 
 *Report generated: February 2026*
-*Scanner version: blockchain-security-toolkit v1.0*
+*Scanner version: abra-toolkit v1.0*
 *Total findings: 134 (0 Critical, 3 High, 99 Medium, 32 Low)*
 *Effective findings after manual triage: 13 unique issues (3 High, 7 Medium, 5 Low)*

@@ -977,6 +977,6 @@ Protocol users and integrators should refer to Aave's prior audit reports from T
 ---
 
 *Report generated: 2026-02-24*
-*Scanner version: blockchain-security-toolkit v1.0*
+*Scanner version: abra-toolkit v1.0*
 *Total findings: 96 raw / 13 consolidated*
 *Lines of code analyzed: 1,726*

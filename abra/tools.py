@@ -1,4 +1,4 @@
-"""Inventory for existing blockchain-security tools exposed through ABRA."""
+"""Inventory for existing blockchain security tools exposed through ABRA."""
 
 from __future__ import annotations
 

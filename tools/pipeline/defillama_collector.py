@@ -13,7 +13,7 @@ from common import ensure_dir, now_utc_iso, write_csv, write_json
 
 CHAIN_URL = "https://api.llama.fi/chains"
 PROTOCOLS_URL = "https://api.llama.fi/protocols"
-USER_AGENT = "blockchain-security-research-bot/1.0"
+USER_AGENT = "abra-research-bot/1.0"
 
 
 def fetch_json(session: requests.Session, url: str) -> Any:

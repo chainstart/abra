@@ -142,7 +142,7 @@ class ResearchLabManifest:
 
 
 def repo_root() -> Path:
-    """Return the blockchain-security repository root."""
+    """Return the ABRA repository root."""
 
     return Path(__file__).resolve().parents[1]
 

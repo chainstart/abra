@@ -1,185 +1,147 @@
-{
-  "decision_log_path": ".engineering/state/decision-log.jsonl",
-  "default_timeout_seconds": 300,
-  "milestones": [
-    {
-      "id": "baseline",
-      "objective": "Verify the project can run its baseline checks under the shared engineering harness.",
-      "status": "completed",
-      "tasks": [
-        {
-          "acceptance": [
-            {
-              "command": "python3 -m pytest -q",
-              "name": "Run Python test suite",
-              "required": true,
-              "timeout_seconds": 600
-            }
-          ],
-          "file_scope": [
-            "**"
-          ],
-          "id": "tests",
-          "max_attempts": 2,
-          "status": "completed",
-          "title": "Run Python test suite"
-        }
-      ],
-      "title": "Project Baseline"
-    },
-    {
-      "id": "abra-initial-spec-completion",
-      "title": "ABRA Initial Spec Completion",
-      "status": "active",
-      "objective": "Finish the blockchain-security to ABRA domain lab tasks required by the initial ARA ecosystem spec.",
-      "tasks": [
-        {
-          "id": "abra-harness-manifest-hardening",
-          "title": "Harden ABRA harness baseline, manifest, and CLI smoke",
-          "status": "completed",
-          "max_attempts": 2,
-          "max_task_iterations": 3,
-          "file_scope": [
-            "**",
-            "research_lab.yaml",
-            "README.md",
-            "docs/**",
-            "abra/**",
-            "tools/**",
-            "tests/test_abra_manifest.py",
-            "tests/test_abra_cli.py",
-            ".engineering/roadmap.yaml"
-          ],
-          "implementation": [
-            {
-              "name": "codex hardens ABRA harness and manifest",
-              "executor": "codex",
-              "prompt": "Implement task package 7 from /home/biostar/work/projects/auto-research-agent/docs/initial_spec_remaining_harness_packages.zh.md. Stabilize blockchain-security as ABRA: ensure research_lab.yaml matches the ARA lab contract, add a lightweight python3 -m abra CLI with manifest/smoke inspection, preserve existing tools and reports, and add tests. Do not remove existing reports or chain-analysis artifacts.",
-              "timeout_seconds": 1800,
-              "no_progress_timeout_seconds": 420,
-              "requested_capabilities": [
-                "agent"
-              ]
-            }
-          ],
-          "acceptance": [
-            {
-              "name": "ABRA manifest CLI smoke",
-              "command": "python3 -m abra labs inspect --json >/tmp/abra_manifest_inspect.json",
-              "required": true,
-              "timeout_seconds": 120
-            },
-            {
-              "name": "ABRA manifest tests pass",
-              "command": "python3 -m pytest -q tests/test_abra_manifest.py tests/test_abra_cli.py",
-              "required": true,
-              "timeout_seconds": 300
-            }
-          ]
-        },
-        {
-          "id": "abra-result-bundle-exporter",
-          "title": "Export ABRA result bundles with evidence-level claims",
-          "status": "completed",
-          "max_attempts": 2,
-          "max_task_iterations": 3,
-          "file_scope": [
-            "**",
-            "abra/**",
-            "tools/**",
-            "reports/**",
-            "tests/fixtures/**",
-            "tests/test_abra_result_bundle.py",
-            ".engineering/roadmap.yaml"
-          ],
-          "implementation": [
-            {
-              "name": "codex implements ABRA result bundle exporter",
-              "executor": "codex",
-              "prompt": "Implement task package 8 from /home/biostar/work/projects/auto-research-agent/docs/initial_spec_remaining_harness_packages.zh.md. Add an ABRA bundle builder and validator that converts reports/scanner/replay artifacts into abra_result_bundle with claims, evidence levels L1/L4/L6, artifact_manifest, limitations, and writing_brief. The builder must not alter source reports. Add fixtures and tests.",
-              "timeout_seconds": 1800,
-              "no_progress_timeout_seconds": 420,
-              "requested_capabilities": [
-                "agent"
-              ]
-            }
-          ],
-          "acceptance": [
-            {
-              "name": "ABRA result bundle builds",
-              "command": "python3 -m abra bundle build --source reports --out /tmp/abra_result_bundle --json >/tmp/abra_bundle_build.json",
-              "required": true,
-              "timeout_seconds": 180
-            },
-            {
-              "name": "ABRA result bundle validates",
-              "command": "python3 -m abra bundle validate /tmp/abra_result_bundle --json >/tmp/abra_bundle_validate.json",
-              "required": true,
-              "timeout_seconds": 120
-            },
-            {
-              "name": "ABRA bundle tests pass",
-              "command": "python3 -m pytest -q tests/test_abra_result_bundle.py",
-              "required": true,
-              "timeout_seconds": 300
-            }
-          ]
-        },
-        {
-          "id": "abra-replay-evidence-agent-mvp",
-          "title": "Implement bounded ABRA replay evidence agent MVP",
-          "status": "completed",
-          "max_attempts": 2,
-          "max_task_iterations": 3,
-          "file_scope": [
-            "**",
-            "abra/**",
-            "tools/replay_runner.py",
-            "reports/**",
-            "tests/fixtures/**",
-            "tests/test_abra_replay_agent.py",
-            "tests/test_abra_result_bundle.py",
-            ".engineering/roadmap.yaml"
-          ],
-          "implementation": [
-            {
-              "name": "codex implements ABRA replay evidence agent MVP",
-              "executor": "codex",
-              "prompt": "Implement task package 9 from /home/biostar/work/projects/auto-research-agent/docs/initial_spec_remaining_harness_packages.zh.md. Add a bounded replay/evidence agent MVP over local fixtures and existing replay_runner support. It must produce structured replay feasibility reports, failure reasons, required RPC/environment notes, and evidence levels without broadcasting transactions or requiring live private keys.",
-              "timeout_seconds": 2400,
-              "no_progress_timeout_seconds": 480,
-              "requested_capabilities": [
-                "agent"
-              ]
-            }
-          ],
-          "acceptance": [
-            {
-              "name": "ABRA replay assessment fixture runs",
-              "command": "python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_replay_bundle --json >/tmp/abra_replay_assess.json",
-              "required": true,
-              "timeout_seconds": 240
-            },
-            {
-              "name": "ABRA evidence validation runs",
-              "command": "python3 -m abra evidence validate /tmp/abra_replay_bundle --min-level L1 --json >/tmp/abra_evidence_validate.json",
-              "required": true,
-              "timeout_seconds": 120
-            },
-            {
-              "name": "ABRA replay agent tests pass",
-              "command": "python3 -m pytest -q tests/test_abra_replay_agent.py tests/test_abra_result_bundle.py",
-              "required": true,
-              "timeout_seconds": 360
-            }
-          ]
-        }
-      ]
-    }
-  ],
-  "profile": "python-agent",
-  "project": "blockchain-security",
-  "report_dir": ".engineering/reports/tasks",
-  "state_path": ".engineering/state/harness-state.json",
-  "version": 1
-}
+decision_log_path: .engineering/state/decision-log.jsonl
+default_timeout_seconds: 300
+milestones:
+- id: baseline
+  objective: Verify the project can run its baseline checks under the shared engineering
+    harness.
+  status: completed
+  tasks:
+  - acceptance:
+    - command: python3 -m pytest -q
+      name: Run Python test suite
+      required: true
+      timeout_seconds: 600
+    file_scope:
+    - '**'
+    id: tests
+    max_attempts: 2
+    status: completed
+    title: Run Python test suite
+  title: Project Baseline
+- id: abra-initial-spec-completion
+  title: ABRA Initial Spec Completion
+  status: completed
+  objective: Finish the ABRA domain lab tasks required by the initial ARA ecosystem
+    spec.
+  tasks:
+  - id: abra-harness-manifest-hardening
+    title: Harden ABRA harness baseline, manifest, and CLI smoke
+    status: completed
+    max_attempts: 2
+    max_task_iterations: 3
+    file_scope:
+    - '**'
+    - research_lab.yaml
+    - README.md
+    - docs/**
+    - abra/**
+    - tools/**
+    - tests/test_abra_manifest.py
+    - tests/test_abra_cli.py
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex hardens ABRA harness and manifest
+      executor: codex
+      prompt: 'Implement task package 7 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md.
+        Stabilize ABRA: ensure research_lab.yaml matches the ARA lab contract, add
+        a lightweight python3 -m abra CLI with manifest/smoke inspection, preserve
+        existing tools and reports, and add tests. Do not remove existing reports
+        or chain-analysis artifacts.'
+      timeout_seconds: 1800
+      no_progress_timeout_seconds: 420
+      requested_capabilities:
+      - agent
+    acceptance:
+    - name: ABRA manifest CLI smoke
+      command: python3 -m abra labs inspect --json >/tmp/abra_manifest_inspect.json
+      required: true
+      timeout_seconds: 120
+    - name: ABRA manifest tests pass
+      command: python3 -m pytest -q tests/test_abra_manifest.py tests/test_abra_cli.py
+      required: true
+      timeout_seconds: 300
+  - id: abra-result-bundle-exporter
+    title: Export ABRA result bundles with evidence-level claims
+    status: completed
+    max_attempts: 2
+    max_task_iterations: 3
+    file_scope:
+    - '**'
+    - abra/**
+    - tools/**
+    - reports/**
+    - tests/fixtures/**
+    - tests/test_abra_result_bundle.py
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex implements ABRA result bundle exporter
+      executor: codex
+      prompt: Implement task package 8 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md.
+        Add an ABRA bundle builder and validator that converts reports/scanner/replay
+        artifacts into abra_result_bundle with claims, evidence levels L1/L4/L6, artifact_manifest,
+        limitations, and writing_brief. The builder must not alter source reports.
+        Add fixtures and tests.
+      timeout_seconds: 1800
+      no_progress_timeout_seconds: 420
+      requested_capabilities:
+      - agent
+    acceptance:
+    - name: ABRA result bundle builds
+      command: python3 -m abra bundle build --source reports --out /tmp/abra_result_bundle
+        --json >/tmp/abra_bundle_build.json
+      required: true
+      timeout_seconds: 180
+    - name: ABRA result bundle validates
+      command: python3 -m abra bundle validate /tmp/abra_result_bundle --json >/tmp/abra_bundle_validate.json
+      required: true
+      timeout_seconds: 120
+    - name: ABRA bundle tests pass
+      command: python3 -m pytest -q tests/test_abra_result_bundle.py
+      required: true
+      timeout_seconds: 300
+  - id: abra-replay-evidence-agent-mvp
+    title: Implement bounded ABRA replay evidence agent MVP
+    status: completed
+    max_attempts: 2
+    max_task_iterations: 3
+    file_scope:
+    - '**'
+    - abra/**
+    - tools/replay_runner.py
+    - reports/**
+    - tests/fixtures/**
+    - tests/test_abra_replay_agent.py
+    - tests/test_abra_result_bundle.py
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex implements ABRA replay evidence agent MVP
+      executor: codex
+      prompt: Implement task package 9 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md.
+        Add a bounded replay/evidence agent MVP over local fixtures and existing replay_runner
+        support. It must produce structured replay feasibility reports, failure reasons,
+        required RPC/environment notes, and evidence levels without broadcasting transactions
+        or requiring live private keys.
+      timeout_seconds: 2400
+      no_progress_timeout_seconds: 480
+      requested_capabilities:
+      - agent
+    acceptance:
+    - name: ABRA replay assessment fixture runs
+      command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json
+        --out /tmp/abra_replay_bundle --json >/tmp/abra_replay_assess.json
+      required: true
+      timeout_seconds: 240
+    - name: ABRA evidence validation runs
+      command: python3 -m abra evidence validate /tmp/abra_replay_bundle --min-level
+        L1 --json >/tmp/abra_evidence_validate.json
+      required: true
+      timeout_seconds: 120
+    - name: ABRA replay agent tests pass
+      command: python3 -m pytest -q tests/test_abra_replay_agent.py tests/test_abra_result_bundle.py
+      required: true
+      timeout_seconds: 360
+profile: python-agent
+project: abra
+report_dir: .engineering/reports/tasks
+state_path: .engineering/state/harness-state.json
+version: 1

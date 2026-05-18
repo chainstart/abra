@@ -16,7 +16,7 @@ from bs4 import BeautifulSoup
 from common import ensure_dir, now_utc_iso, parse_loss_usd, sha1_id, write_csv, write_json
 
 BASE_URL = "https://hacked.slowmist.io/"
-USER_AGENT = "blockchain-security-research-bot/1.0"
+USER_AGENT = "abra-research-bot/1.0"
 
 
 def fetch_html(session: requests.Session, page: int, category: str) -> str:

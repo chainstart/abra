@@ -127,9 +127,9 @@ This design allows the protocol to rebase all balances simultaneously by simply 
 
 | # | File | Path | LOC | Compiler |
 |---|------|------|-----|----------|
-| 1 | Lido.sol | `/home/biostar/blockchain-security/contracts/lido/Lido.sol` | 645 | Solidity ^0.8.9 |
-| 2 | LidoOracle.sol | `/home/biostar/blockchain-security/contracts/lido/LidoOracle.sol` | 353 | Solidity ^0.8.9 |
-| 3 | WstETH.sol | `/home/biostar/blockchain-security/contracts/lido/WstETH.sol` | 216 | Solidity ^0.8.9 |
+| 1 | Lido.sol | `/home/biostar/work/projects/abra/contracts/lido/Lido.sol` | 645 | Solidity ^0.8.9 |
+| 2 | LidoOracle.sol | `/home/biostar/work/projects/abra/contracts/lido/LidoOracle.sol` | 353 | Solidity ^0.8.9 |
+| 3 | WstETH.sol | `/home/biostar/work/projects/abra/contracts/lido/WstETH.sol` | 216 | Solidity ^0.8.9 |
 
 ### 3.2 Out of Scope
 

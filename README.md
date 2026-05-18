@@ -1,9 +1,9 @@
 # ABRA: Automated Blockchain Research Agents
 
 ABRA is the ARA ecosystem's blockchain security domain lab. It preserves the
-existing `blockchain-security` static analysis, DeFi incident pipeline, Foundry
-replay, reports, findings, and paper artifacts while adding a small manifest and
-CLI surface for harness-driven inspection.
+existing static analysis, DeFi incident pipeline, Foundry replay, reports,
+findings, and paper artifacts while adding a small manifest and CLI surface for
+harness-driven inspection.
 
 The historical repository name `blockchain-security` remains supported through
 `research_lab.yaml` legacy aliases.
@@ -19,7 +19,7 @@ python3 -m abra labs inspect --json
 # Run side-effect-free manifest, tool, report, and findings smoke checks.
 python3 -m abra labs smoke --json
 
-# List the preserved blockchain-security domain tools exposed to ABRA.
+# List the preserved blockchain security domain tools exposed to ABRA.
 python3 -m abra tools list --json
 ```
 
@@ -46,7 +46,7 @@ ARA discovers this lab through `research_lab.yaml`, which declares:
 ## Project Structure
 
 ```
-blockchain-security/
+abra/
 ├── README.md                          # This file
 ├── reports/                           # Audit reports
 │   ├── 00_defi_tvl_landscape.md       # DeFi TVL landscape research

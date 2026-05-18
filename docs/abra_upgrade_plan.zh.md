@@ -6,7 +6,7 @@
 
 ## 1. 结论
 
-当前 `blockchain-security` 更准确的定位是“区块链安全研究工具箱 / 领域实验室”，还不能算一个完整智能体。
+当前 `abra` 更准确的定位是“区块链安全研究工具箱 / 领域实验室”，还不能算一个完整智能体。
 
 它已经具备：
 
@@ -27,7 +27,7 @@
 
 因此推荐的升级方向是：
 
-> 保留 `blockchain-security` 作为领域实验室仓库，在原仓库内新增 `ABRA` agent 层。短期不建议新建干净仓库，也不建议直接把仓库改名为 `abra`。
+> 保留 `abra` 作为领域实验室仓库，在原仓库内新增 `ABRA` agent 层。短期不建议新建干净仓库，也不建议直接把仓库改名为 `abra`。
 
 `ABRA` 可以作为系统名使用，建议含义为：
 
@@ -37,20 +37,20 @@
 
 ### 2.1 推荐方案：原仓库内重构
 
-短期推荐在 `blockchain-security` 原仓库内重构，而不是新建一个干净仓库。
+短期推荐在 `abra` 原仓库内重构，而不是新建一个干净仓库。
 
 理由：
 
 - 现有工具、数据、报告、replay 测试和 paper artifact 都在这个仓库内，agent 的“环境”就在这里。
 - 区块链安全研究强依赖本地 Foundry、合约、事件数据、RPC 配置和 replay 产物；拆到新仓库会增加路径、依赖和 artifact 同步成本。
 - 当前最缺的是 agent loop、tool registry、memory 和 evaluator，不是一个空白工程。
-- 原仓库已经可以被 `auto-research-agent` 作为外部实验室调用，继续增强这个边界更自然。
+- 原仓库已经可以被 `ara` 作为外部实验室调用，继续增强这个边界更自然。
 - 新建仓库容易形成“干净但脱离真实实验环境”的 agent 壳。
 
 推荐做法是：
 
 ```text
-blockchain-security/
+abra/
   abra/                  # 新增：ABRA agent 层
   tools/                 # 保留：领域工具箱
   test/replay/           # 保留：Foundry replay
@@ -66,7 +66,7 @@ blockchain-security/
 只有满足以下条件时，才考虑把 ABRA agent 层拆成独立仓库：
 
 - `abra/` agent 层已经稳定，有清楚的 CLI、schema 和 tool protocol。
-- `blockchain-security` 已经有稳定的 `research_lab.yaml` 和 artifact contract。
+- `abra` 已经有稳定的 `research_lab.yaml` 和 artifact contract。
 - ABRA 需要同时调度多个不同区块链安全实验室，而不只是当前这个仓库。
 - ABRA 的 agent 逻辑已经足够通用，可以脱离具体 Foundry 工程和数据目录运行。
 - 原仓库中的实验工具和 agent 层出现明显发布节奏冲突。
@@ -75,7 +75,7 @@ blockchain-security/
 
 ```text
 abra-agent/              # 独立智能体编排层
-blockchain-security/     # 默认领域实验室
+abra/     # 默认领域实验室
 other-security-labs/     # 其他可被 ABRA 调用的实验室
 ```
 
@@ -128,7 +128,7 @@ User / ARA / Scheduler
 ### 4.2 推荐目录结构
 
 ```text
-blockchain-security/
+abra/
   abra/
     __init__.py
     cli.py
@@ -416,12 +416,12 @@ ARA 仍应是论文和通用科研流程层；ABRA 是区块链安全研究智�
 
 ```text
 ARA
-  -> 调用 ABRA CLI 或 blockchain-security/research_lab.yaml
+  -> 调用 ABRA CLI 或 abra/research_lab.yaml
   -> 获取 evidence_bundle.json、artifact_manifest.json、final_report.md
   -> 生成论文、审稿、返修
 
 ABRA
-  -> 调用 blockchain-security 内部工具
+  -> 调用 abra 内部工具
   -> 生成 evidence bundle
   -> 不负责通用论文流水线
 ```
@@ -432,11 +432,11 @@ ABRA
 
 ### 阶段 0：保留现状，建立边界
 
-目标：明确 `blockchain-security` 是实验室，ABRA 是新增 agent 层。
+目标：明确 `abra` 是实验室，ABRA 是新增 agent 层。
 
 任务：
 
-- 保留仓库名 `blockchain-security`。
+- 保留仓库名 `abra`。
 - 在 README 中增加 ABRA roadmap。
 - 新增 `docs/abra_upgrade_plan.zh.md`。
 - 不移动现有工具、报告和测试。
@@ -552,7 +552,7 @@ python3 -m abra run \
 
 - ABRA 已经能调度多个实验室。
 - 当前仓库内 agent 层和领域工具层发布节奏冲突。
-- 其他项目需要复用 ABRA agent，而不需要 `blockchain-security` 的具体数据和 Foundry 工程。
+- 其他项目需要复用 ABRA agent，而不需要 `abra` 的具体数据和 Foundry 工程。
 
 如果满足，再新建：
 
@@ -610,10 +610,10 @@ MVP 成功标准：
 
 短期：
 
-- 仓库名继续使用 `blockchain-security`。
+- 仓库名继续使用 `abra`。
 - 新增 agent 层命名为 `ABRA`。
 - README 中写清：
-  - `blockchain-security` 是领域实验室。
+  - `abra` 是领域实验室。
   - `ABRA` 是该实验室上的 agent 层。
 
 中期：
@@ -663,4 +663,4 @@ ABRA 输出给 ARA 的每个 claim 都必须能追溯到 artifact、命令和 ev
 
 最终建议：
 
-> 不要从新仓库开始。先在 `blockchain-security` 中新增 ABRA agent 层，把真实工具、真实数据、真实 replay 和真实证据闭环跑通。等 agent 层稳定后，再评估是否拆出独立仓库。
+> 不要从新仓库开始。先在 `abra` 中新增 ABRA agent 层，把真实工具、真实数据、真实 replay 和真实证据闭环跑通。等 agent 层稳定后，再评估是否拆出独立仓库。
