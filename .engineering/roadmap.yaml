@@ -215,7 +215,7 @@ milestones:
   tasks:
   - id: ABRA-ARA-001
     title: Keep ABRA bundles consumable by public ARA drafting/reporting
-    status: pending
+    status: completed
     max_attempts: 2
     max_task_iterations: 3
     manual_approval_required: false

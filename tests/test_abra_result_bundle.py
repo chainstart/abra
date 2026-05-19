@@ -7,9 +7,11 @@ import sys
 from pathlib import Path
 
 from abra.bundle import build_result_bundle, validate_result_bundle
+from abra.replay_agent import assess_replay_fixture
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "abra_bundle_source"
+REPLAY_FIXTURE = Path(__file__).parent / "fixtures" / "replay_case.json"
 
 
 def test_bundle_builder_writes_expected_files_and_preserves_sources(tmp_path):
@@ -22,8 +24,11 @@ def test_bundle_builder_writes_expected_files_and_preserves_sources(tmp_path):
     assert result.payload["status"] == "passed"
     bundle_dir = tmp_path / "bundle"
     assert (bundle_dir / "abra_result_bundle.json").exists()
+    assert (bundle_dir / "bundle_manifest.json").exists()
+    assert (bundle_dir / "claims.json").exists()
     assert (bundle_dir / "evidence_bundle.json").exists()
     assert (bundle_dir / "artifact_manifest.json").exists()
+    assert (bundle_dir / "drafting_brief.md").exists()
     assert (bundle_dir / "writing_brief.md").exists()
     assert (bundle_dir / "limitations.md").exists()
 
@@ -35,6 +40,11 @@ def test_bundle_builder_writes_expected_files_and_preserves_sources(tmp_path):
     assert bundle["summary"]["evidence_level_counts"]["L6"] == 1
     assert any("archive_state_unavailable" in item["description"] for item in bundle["limitations"])
     assert "Do not describe L1 static alerts" in (bundle_dir / "writing_brief.md").read_text(encoding="utf-8")
+
+    ara_claims = json.loads((bundle_dir / "claims.json").read_text(encoding="utf-8"))["claims"]
+    claim_status_by_level = {claim["evidence_level"]: claim["status"] for claim in ara_claims}
+    assert claim_status_by_level["L1"] == "blocked"
+    assert claim_status_by_level["L4"] == "supported"
 
 
 def test_bundle_validator_accepts_valid_bundle(tmp_path):
@@ -108,6 +118,38 @@ def test_bundle_cli_build_and_validate_round_trip(tmp_path):
     assert validate.returncode == 0, validate.stderr
     validate_payload = json.loads(validate.stdout)
     assert validate_payload["status"] == "passed"
+
+
+def test_public_ara_accepts_replay_bundle_without_allowing_l1_replay_claims(tmp_path):
+    bundle_dir = tmp_path / "replay_bundle"
+    assess_replay_fixture(REPLAY_FIXTURE, bundle_dir)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/ara_bundle_validate.py",
+            str(bundle_dir),
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "passed", payload["errors"]
+    assert payload["ara_validation"]["valid"] is True
+    assert payload["contract_summary"]["allowed_claim_ids"] == ["l4-replay-fixture-euler"]
+    assert set(payload["contract_summary"]["blocked_claim_ids"]) == {
+        "l1-replay-fixture-archive-blocked",
+        "l1-replay-fixture-missing-rpc",
+        "l1-replay-fixture-missing-test",
+    }
+    allowed = payload["drafting_context"]["allowed_claims"]
+    blocked = payload["drafting_context"]["blocked_claims"]
+    assert all(claim["evidence_level"] == "L4" for claim in allowed)
+    assert all(claim["evidence_level"] == "L1" for claim in blocked)
 
 
 def _fingerprints(root: Path) -> dict[str, str]:

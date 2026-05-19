@@ -12,7 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from abra.bundle import ARTIFACT_MANIFEST_SCHEMA_VERSION, EVIDENCE_BUNDLE_SCHEMA_VERSION, EVIDENCE_LABELS
+from abra.bundle import (
+    ARTIFACT_MANIFEST_SCHEMA_VERSION,
+    EVIDENCE_BUNDLE_SCHEMA_VERSION,
+    EVIDENCE_LABELS,
+    ara_bundle_manifest,
+    ara_claims_payload,
+)
 from tools.replay_runner import ReplayResult, classify_failure
 
 
@@ -134,6 +140,7 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
 
     artifact_by_path = {entry["bundle_path"]: entry for entry in artifact_entries}
     claims = _build_claims(assessments, artifact_entries, artifact_by_path)
+    limitations = _bundle_limitations(assessments, claims)
     evidence_bundle = {
         "schema_version": EVIDENCE_BUNDLE_SCHEMA_VERSION,
         "bundle_type": REPLAY_BUNDLE_TYPE,
@@ -147,11 +154,21 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         "memory_ledger": "memory/replay_memory_ledger.json",
         "evidence_levels": EVIDENCE_LABELS,
         "claims": claims,
+        "limitations": limitations,
         "safety": report["safety"],
     }
     evidence_path = out_path / "evidence_bundle.json"
     evidence_path.write_text(json.dumps(evidence_bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     artifact_entries.append(_artifact_entry(out_path, evidence_path, "evidence_bundle", "claim_index"))
+
+    ara_files = _write_ara_contract_files(
+        out_path=out_path,
+        generated_at=generated_at,
+        source_fixture=str(fixture_path),
+        claims=claims,
+        limitations=limitations,
+        artifact_count=len(artifact_entries),
+    )
 
     artifact_manifest = {
         "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
@@ -173,6 +190,7 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         "evidence_bundle.json",
         "artifact_manifest.json",
     ]
+    files_written.extend(ara_files)
     files_written.extend(str(path.relative_to(out_path)) for path in sorted(log_paths))
     payload = {
         "schema_version": REPLAY_ASSESSMENT_SCHEMA_VERSION,
@@ -1014,6 +1032,118 @@ def _build_claims(
     return claims
 
 
+def _bundle_limitations(assessments: list[dict[str, Any]], claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    blocked_claim_ids = [claim["claim_id"] for claim in claims if claim.get("evidence_level") != "L4"]
+    verified_claim_ids = [claim["claim_id"] for claim in claims if claim.get("evidence_level") == "L4"]
+    limitations = [
+        {
+            "limitation_id": "lim-replay-feasibility-not-reproduction",
+            "scope": "replay_feasibility",
+            "description": (
+                "L1 replay-feasibility claims record blockers or missing preconditions only; "
+                "public drafting must not treat them as successful exploit replay."
+            ),
+            "affected_claim_ids": blocked_claim_ids,
+        },
+        {
+            "limitation_id": "lim-no-broadcast-or-private-keys",
+            "scope": "safety",
+            "description": (
+                "The assessment is deterministic and local: no private keys, transaction broadcast, "
+                "live trading, or state-changing RPC calls are used."
+            ),
+            "affected_claim_ids": [claim["claim_id"] for claim in claims],
+        },
+        {
+            "limitation_id": "lim-fixture-backed-replay-boundary",
+            "scope": "replay_evidence",
+            "description": (
+                "L4 replay claims in this bundle are fixture-backed local fork replay observations; "
+                "they do not prove adjacent exploit variants or live-chain exploitability."
+            ),
+            "affected_claim_ids": verified_claim_ids,
+        },
+    ]
+    for case in assessments:
+        if case.get("verified"):
+            continue
+        limitations.append(
+            {
+                "limitation_id": f"lim-replay-{case['slug']}",
+                "scope": "replay_blocker",
+                "description": (
+                    f"{case['incident']} remains blocked with replay status `{case['replay_status']}`, "
+                    f"feasibility `{case['feasibility']}`, and failure code `{case['failure_reason']['code']}`."
+                ),
+                "affected_claim_ids": [f"{case['evidence_level'].lower()}-replay-{case['slug']}"],
+            }
+        )
+    return limitations
+
+
+def _write_ara_contract_files(
+    *,
+    out_path: Path,
+    generated_at: str,
+    source_fixture: str,
+    claims: list[dict[str, Any]],
+    limitations: list[dict[str, Any]],
+    artifact_count: int,
+) -> list[str]:
+    files = {
+        "bundle_manifest.json": ara_bundle_manifest(
+            generated_at=generated_at,
+            source_path=source_fixture,
+            source_bundle_type=REPLAY_BUNDLE_TYPE,
+            claim_count=len(claims),
+            artifact_count=artifact_count,
+        ),
+        "claims.json": ara_claims_payload(claims, generated_at, REPLAY_BUNDLE_TYPE),
+    }
+    for name, payload in files.items():
+        (out_path / name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    limitations_text = _render_bundle_limitations(limitations)
+    drafting_text = _render_drafting_brief(claims, limitations)
+    (out_path / "limitations.md").write_text(limitations_text, encoding="utf-8")
+    (out_path / "drafting_brief.md").write_text(drafting_text, encoding="utf-8")
+    (out_path / "writing_brief.md").write_text(drafting_text, encoding="utf-8")
+    return ["bundle_manifest.json", "claims.json", "limitations.md", "drafting_brief.md", "writing_brief.md"]
+
+
+def _render_bundle_limitations(limitations: list[dict[str, Any]]) -> str:
+    lines = ["# ABRA Replay Bundle Limitations", ""]
+    for limitation in limitations:
+        lines.append(f"- `{limitation['limitation_id']}` ({limitation['scope']}): {limitation['description']}")
+    return "\n".join(lines) + "\n"
+
+
+def _render_drafting_brief(claims: list[dict[str, Any]], limitations: list[dict[str, Any]]) -> str:
+    counts = _evidence_counts(claims)
+    lines = [
+        "# ABRA ARA Drafting Brief",
+        "",
+        "## Evidence Boundary",
+        "",
+        f"- L4 fork replay claims available to public drafting: {counts.get('L4', 0)}",
+        f"- L1 replay-feasibility or blocker claims excluded from successful replay drafting: {counts.get('L1', 0)}",
+        "- Do not describe replay blockers, static alerts, missing tests, or RPC failures as successful exploit replay.",
+        "- Do not use private keys, broadcast transactions, live trading, or state-changing RPC calls for this bundle.",
+        "",
+        "## Claims",
+        "",
+    ]
+    for claim in claims:
+        ara_status = "supported" if claim.get("evidence_level") == "L4" else "blocked"
+        lines.append(
+            f"- `{claim['claim_id']}` ({claim['evidence_level']} {claim['evidence_label']}, ARA status `{ara_status}`): "
+            f"{claim['claim']}"
+        )
+    lines.extend(["", "## Limitations", ""])
+    for limitation in limitations:
+        lines.append(f"- `{limitation['limitation_id']}`: {limitation['description']}")
+    return "\n".join(lines) + "\n"
+
+
 def _validate_evidence_artifacts(
     root: Path,
     artifacts: list[Any],
@@ -1628,11 +1758,30 @@ def _artifact_entry(root: Path, path: Path, kind: str, role: str) -> dict[str, A
         "artifact_id": _artifact_id(relative),
         "kind": kind,
         "role": role,
+        "description": _artifact_description(kind, role),
         "path": relative.as_posix(),
         "bundle_path": relative.as_posix(),
         "sha256": _sha256_file(path),
         "size_bytes": path.stat().st_size,
     }
+
+
+def _artifact_description(kind: str, role: str) -> str:
+    if kind == "replay_log":
+        return "Fork replay log artifact for bounded local replay evidence."
+    if kind == "replay_feasibility_report":
+        return "Replay feasibility report; distinguishes verified fork replay from blocked preconditions."
+    if kind == "replay_blocker_ledger":
+        return "Replay blocker ledger preserving missing preconditions and non-reproduction boundaries."
+    if kind == "archive_rpc_validation":
+        return "Deterministic local archive RPC validation artifact; no network access or transaction broadcast."
+    if kind == "replay_case_fixture":
+        return "Input fixture declaring bounded replay cases and expected local outcomes."
+    if kind == "evidence_bundle":
+        return "ABRA evidence bundle claim index for replay assessment."
+    if kind.startswith("replay_"):
+        return "ABRA replay memory artifact for deterministic local assessment."
+    return f"ABRA artifact for {role}."
 
 
 def _artifact_id(relative: Path) -> str:

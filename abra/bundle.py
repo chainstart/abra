@@ -21,6 +21,9 @@ ARTIFACT_MANIFEST_SCHEMA_VERSION = "abra.artifact_manifest.v1"
 WRITING_BRIEF_SCHEMA_VERSION = "abra.writing_brief.v1"
 BUILD_SCHEMA_VERSION = "abra.result_bundle.build.v1"
 VALIDATION_SCHEMA_VERSION = "abra.result_bundle.validation.v1"
+ARA_BUNDLE_MANIFEST_SCHEMA_VERSION = "ara.result_bundle.v1"
+ARA_CLAIMS_SCHEMA_VERSION = "abra.ara_claims.v1"
+ARA_DOMAIN = "blockchain_security"
 
 EVIDENCE_LABELS = {
     "L0": "hypothesis",
@@ -33,8 +36,11 @@ EVIDENCE_LABELS = {
 }
 REQUIRED_BUNDLE_FILES = (
     "abra_result_bundle.json",
+    "bundle_manifest.json",
+    "claims.json",
     "evidence_bundle.json",
     "artifact_manifest.json",
+    "drafting_brief.md",
     "writing_brief.md",
     "limitations.md",
 )
@@ -236,8 +242,10 @@ def _copy_artifact(path: Path, artifacts_dir: Path, source_path: Path) -> dict[s
         "artifact_id": _artifact_id(relative),
         "kind": _artifact_kind(relative),
         "role": _artifact_role(relative),
+        "description": _artifact_description(relative),
         "original_path": str(path.resolve()),
-        "path": relative.as_posix(),
+        "source_path": relative.as_posix(),
+        "path": bundled_relative.as_posix(),
         "bundle_path": bundled_relative.as_posix(),
         "sha256": digest,
         "size_bytes": destination.stat().st_size,
@@ -300,6 +308,25 @@ def _artifact_role(relative: Path) -> str:
     if kind == "findings_summary":
         return "manual_audit_summary"
     return "supporting_report"
+
+
+def _artifact_description(relative: Path) -> str:
+    kind = _artifact_kind(relative)
+    if kind == "scanner_results":
+        return "Static analysis source artifact; supports L1 static-alert claims only."
+    if kind == "replay_results":
+        return "Fork replay result table used to distinguish verified L4 replay from blocked replay attempts."
+    if kind == "replay_blocker_matrix":
+        return "Replay blocker matrix used to preserve replay limitations and missing preconditions."
+    if kind == "replay_log":
+        return "Fork replay log artifact for a bounded local replay result."
+    if kind == "incident_card":
+        return "Incident context card for claim background and citation."
+    if kind == "replay_report":
+        return "Human replay interpretation report; does not upgrade static alerts by itself."
+    if kind == "findings_summary":
+        return "Manual audit summary for source-level finding context."
+    return "Supporting ABRA bundle artifact."
 
 
 def _build_claims(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -562,17 +589,81 @@ def _write_bundle_files(
     limitations: list[dict[str, Any]],
     writing_brief: dict[str, Any],
 ) -> list[str]:
+    generated_at = str(bundle["generated_at"])
     files = {
         "abra_result_bundle.json": bundle,
+        "bundle_manifest.json": ara_bundle_manifest(
+            generated_at=generated_at,
+            source_path=str(bundle["source_path"]),
+            source_bundle_type="abra_result_bundle",
+            claim_count=len(bundle["claims"]),
+            artifact_count=len(artifact_manifest["artifacts"]),
+        ),
+        "claims.json": ara_claims_payload(bundle["claims"], generated_at, "abra_result_bundle"),
         "evidence_bundle.json": evidence_bundle,
         "artifact_manifest.json": artifact_manifest,
     }
     for name, payload in files.items():
         (out_path / name).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_path / "limitations.md").write_text(_render_limitations(limitations), encoding="utf-8")
-    (out_path / "writing_brief.md").write_text(_render_writing_brief(writing_brief, bundle["claims"]), encoding="utf-8")
+    drafting_brief = _render_writing_brief(writing_brief, bundle["claims"])
+    (out_path / "drafting_brief.md").write_text(drafting_brief, encoding="utf-8")
+    (out_path / "writing_brief.md").write_text(drafting_brief, encoding="utf-8")
     (out_path / "final_report.md").write_text(_render_final_report(bundle), encoding="utf-8")
-    return [*files.keys(), "limitations.md", "writing_brief.md", "final_report.md"]
+    return [*files.keys(), "limitations.md", "drafting_brief.md", "writing_brief.md", "final_report.md"]
+
+
+def ara_bundle_manifest(
+    *,
+    generated_at: str,
+    source_path: str,
+    source_bundle_type: str,
+    claim_count: int,
+    artifact_count: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": ARA_BUNDLE_MANIFEST_SCHEMA_VERSION,
+        "bundle_type": "abra_result_bundle",
+        "domain": ARA_DOMAIN,
+        "created_at": generated_at,
+        "producer": "abra",
+        "source_bundle_type": source_bundle_type,
+        "source_path": source_path,
+        "claim_count": claim_count,
+        "artifact_count": artifact_count,
+        "safety": {
+            "broadcasts_transactions": False,
+            "requires_private_keys": False,
+            "live_trading": False,
+        },
+    }
+
+
+def ara_claims_payload(claims: list[dict[str, Any]], generated_at: str, source_bundle_type: str) -> dict[str, Any]:
+    return {
+        "schema_version": ARA_CLAIMS_SCHEMA_VERSION,
+        "producer": "abra",
+        "generated_at": generated_at,
+        "source_bundle_type": source_bundle_type,
+        "claims": [_ara_claim(claim) for claim in claims],
+    }
+
+
+def _ara_claim(claim: dict[str, Any]) -> dict[str, Any]:
+    reproduction = claim.get("reproduction") if isinstance(claim.get("reproduction"), dict) else {}
+    level = str(claim.get("evidence_level") or "")
+    status = "supported" if level in {"L4", "L6"} and reproduction.get("status") in {"verified", "synthesized_from_artifacts"} else "blocked"
+    return {
+        "claim_id": str(claim.get("claim_id") or ""),
+        "claim": str(claim.get("claim") or ""),
+        "status": status,
+        "evidence_level": level,
+        "source_kind": claim.get("source_kind"),
+        "claim_type": claim.get("claim_type"),
+        "reproduction_status": str(reproduction.get("status") or ""),
+        "supported_by": [str(item) for item in claim.get("supported_by", []) if isinstance(item, str)],
+        "limitations": [str(item) for item in claim.get("limitations", []) if isinstance(item, str)],
+    }
 
 
 def _render_writing_brief(writing_brief: dict[str, Any], claims: list[dict[str, Any]]) -> str:

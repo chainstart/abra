@@ -28,7 +28,7 @@
 | `REQ-ABRA-REPLAY-001` | `partial` | bounded replay assessment、replay blocker ledger、deterministic archive-RPC validation plan | 尚未对真实事件执行 live archive RPC replay；不能广播交易或使用私钥 | 在只读 archive RPC 环境中扩展真实 replay |
 | `REQ-ABRA-AGENT-001` | `partial` | replay/evidence agent MVP | 完整 plan-act-observe-reflect loop 和多 agent 分工不足 | 增加 agent state、tool registry、memory |
 | `REQ-ABRA-MEMORY-001` | `partial` | 历史 reports/findings/data 已保留；replay run ledger 和 memory summary 已写入 replay bundle | 尚缺 repo 级 incident/finding 长期 memory 迁移 | 扩展 memory schema 到 incident/finding/replay 跨运行索引 |
-| `REQ-ABRA-ARA-001` | `partial` | result bundle 可被 ARA 消费 | 需要和公开 ARA drafting/report pipeline 持续对齐 | 增加 ARA bundle smoke |
+| `REQ-ABRA-ARA-001` | `partial` | result/replay bundle 生成 ARA sidecar；`tools/ara_bundle_validate.py` 可调用公开 ARA validate + drafting context | 需要随公开 ARA bundle/drafting contract 持续对齐；真实 replay 仍需只读 archive RPC | 保持跨仓库 ARA smoke |
 
 ## ABRA-REPLAY-001 更新
 
@@ -39,6 +39,20 @@
 - `memory/replay_run_ledger.jsonl` 和 `memory/replay_memory_ledger.json`：保存 replay run、case 状态、blocker summary 和 evidence level，供后续 agent run 复用。
 
 剩余限制：当前 workflow 仍是 bounded/local evidence。真实 L4 升级必须在只读 archive RPC、已知 fork block、明确 replay test、可保存 trace/log 的环境中完成；任何需要 `--broadcast`、`cast send` 或私钥的步骤都不属于 ABRA replay evidence workflow。
+
+## ABRA-ARA-001 更新
+
+ABRA result bundle 和 replay assessment bundle 现在都会输出公开 ARA 消费所需的 sidecar：
+
+- `bundle_manifest.json`、`claims.json`、`drafting_brief.md`、`limitations.md`。
+- `claims.json` 中只有 L4 verified replay claim 标记为 `supported`；L1 static alert / replay-feasibility blocker 标记为 `blocked`。
+- `tools/ara_bundle_validate.py` 在本地调用 `/home/biostar/work/projects/ara` 的 `python3 -m ara bundles validate` 和 `python3 -m ara drafting context`，并检查公开 drafting context 不把 L1 blocker 当成成功 replay claim。
+
+本任务的本地证据命令：
+
+- `python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_ara_bundle --json >/tmp/abra_ara_assess.json`
+- `python3 tools/ara_bundle_validate.py /tmp/abra_ara_bundle --json >/tmp/abra_ara_bundle_validate.json`
+- `python3 -m pytest -q tests/test_abra_result_bundle.py tests/test_abra_cli.py`
 
 ## 维护流程
 
