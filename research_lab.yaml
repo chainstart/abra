@@ -23,6 +23,7 @@ entrypoints:
 commands:
   allow_prefixes:
     - python3 -m abra
+    - PYTHONPATH=/home/biostar/work/projects/ara python3 -m ara bundles validate
     - abra
     - python3 tools/
     - python3 scanner.py

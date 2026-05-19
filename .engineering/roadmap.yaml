@@ -2,8 +2,7 @@ decision_log_path: .engineering/state/decision-log.jsonl
 default_timeout_seconds: 300
 milestones:
 - id: baseline
-  objective: Verify the project can run its baseline checks under the shared engineering
-    harness.
+  objective: Verify the project can run its baseline checks under the shared engineering harness.
   status: completed
   tasks:
   - acceptance:
@@ -21,8 +20,7 @@ milestones:
 - id: abra-initial-spec-completion
   title: ABRA Initial Spec Completion
   status: completed
-  objective: Finish the ABRA domain lab tasks required by the initial ARA ecosystem
-    spec.
+  objective: Finish the ABRA domain lab tasks required by the initial ARA ecosystem spec.
   tasks:
   - id: abra-harness-manifest-hardening
     title: Harden ABRA harness baseline, manifest, and CLI smoke
@@ -42,11 +40,7 @@ milestones:
     implementation:
     - name: codex hardens ABRA harness and manifest
       executor: codex
-      prompt: 'Implement task package 7 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md.
-        Stabilize ABRA: ensure research_lab.yaml matches the ARA lab contract, add
-        a lightweight python3 -m abra CLI with manifest/smoke inspection, preserve
-        existing tools and reports, and add tests. Do not remove existing reports
-        or chain-analysis artifacts.'
+      prompt: 'Implement task package 7 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md. Stabilize ABRA: ensure research_lab.yaml matches the ARA lab contract, add a lightweight python3 -m abra CLI with manifest/smoke inspection, preserve existing tools and reports, and add tests. Do not remove existing reports or chain-analysis artifacts.'
       timeout_seconds: 1800
       no_progress_timeout_seconds: 420
       requested_capabilities:
@@ -76,19 +70,14 @@ milestones:
     implementation:
     - name: codex implements ABRA result bundle exporter
       executor: codex
-      prompt: Implement task package 8 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md.
-        Add an ABRA bundle builder and validator that converts reports/scanner/replay
-        artifacts into abra_result_bundle with claims, evidence levels L1/L4/L6, artifact_manifest,
-        limitations, and writing_brief. The builder must not alter source reports.
-        Add fixtures and tests.
+      prompt: Implement task package 8 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md. Add an ABRA bundle builder and validator that converts reports/scanner/replay artifacts into abra_result_bundle with claims, evidence levels L1/L4/L6, artifact_manifest, limitations, and writing_brief. The builder must not alter source reports. Add fixtures and tests.
       timeout_seconds: 1800
       no_progress_timeout_seconds: 420
       requested_capabilities:
       - agent
     acceptance:
     - name: ABRA result bundle builds
-      command: python3 -m abra bundle build --source reports --out /tmp/abra_result_bundle
-        --json >/tmp/abra_bundle_build.json
+      command: python3 -m abra bundle build --source reports --out /tmp/abra_result_bundle --json >/tmp/abra_bundle_build.json
       required: true
       timeout_seconds: 180
     - name: ABRA result bundle validates
@@ -116,24 +105,18 @@ milestones:
     implementation:
     - name: codex implements ABRA replay evidence agent MVP
       executor: codex
-      prompt: Implement task package 9 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md.
-        Add a bounded replay/evidence agent MVP over local fixtures and existing replay_runner
-        support. It must produce structured replay feasibility reports, failure reasons,
-        required RPC/environment notes, and evidence levels without broadcasting transactions
-        or requiring live private keys.
+      prompt: Implement task package 9 from /home/biostar/work/projects/ara/docs/initial_spec_remaining_harness_packages.zh.md. Add a bounded replay/evidence agent MVP over local fixtures and existing replay_runner support. It must produce structured replay feasibility reports, failure reasons, required RPC/environment notes, and evidence levels without broadcasting transactions or requiring live private keys.
       timeout_seconds: 2400
       no_progress_timeout_seconds: 480
       requested_capabilities:
       - agent
     acceptance:
     - name: ABRA replay assessment fixture runs
-      command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json
-        --out /tmp/abra_replay_bundle --json >/tmp/abra_replay_assess.json
+      command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_replay_bundle --json >/tmp/abra_replay_assess.json
       required: true
       timeout_seconds: 240
     - name: ABRA evidence validation runs
-      command: python3 -m abra evidence validate /tmp/abra_replay_bundle --min-level
-        L1 --json >/tmp/abra_evidence_validate.json
+      command: python3 -m abra evidence validate /tmp/abra_replay_bundle --min-level L1 --json >/tmp/abra_evidence_validate.json
       required: true
       timeout_seconds: 120
     - name: ABRA replay agent tests pass
@@ -143,8 +126,7 @@ milestones:
 - id: abra-next-spec-development
   title: ABRA Next Spec Development
   status: completed
-  objective: Complete the next ABRA dynamic-spec task by extending replay evidence
-    beyond the bounded fixture MVP while preserving deterministic, local safety.
+  objective: Complete the next ABRA dynamic-spec task by extending replay evidence beyond the bounded fixture MVP while preserving deterministic, local safety.
   tasks:
   - id: ABRA-REPLAY-001
     title: Extend replay evidence agent beyond fixture MVP
@@ -166,21 +148,33 @@ milestones:
       no_progress_timeout_seconds: 900
       requested_capabilities:
       - agent
-      prompt: |
-        Implement ABRA dynamic spec task ABRA-REPLAY-001.
+      prompt: 'Implement ABRA dynamic spec task ABRA-REPLAY-001.
+
 
         Extend the bounded replay evidence agent beyond the fixture MVP. Add a replay
+
         blocker ledger that records missing archive-RPC state, unavailable traces,
+
         fork-block gaps, simulation preconditions, and explicit non-broadcast safety
+
         decisions. Add a bounded archive-RPC validation workflow that can run in a
+
         deterministic local mode and can describe what live validation would require
+
         without broadcasting transactions or using private keys.
 
+
         Keep the implementation local and reviewable. Preserve existing reports and
+
         historical chain-analysis artifacts. Add or update tests for blocker-ledger
+
         serialization, replay assessment output, evidence validation, and memory/run
+
         ledger persistence. Update docs and the dynamic spec task ledger/status so
+
         ABRA-REPLAY-001 records the new evidence and remaining limits.
+
+        '
     repair:
     - name: codex repairs replay evidence task
       executor: codex
@@ -188,11 +182,15 @@ milestones:
       no_progress_timeout_seconds: 600
       requested_capabilities:
       - agent
-      prompt: |
-        Repair ABRA-REPLAY-001 using the failing acceptance evidence. Keep changes
+      prompt: 'Repair ABRA-REPLAY-001 using the failing acceptance evidence. Keep changes
+
         scoped to the replay evidence agent, blocker ledger, tests, docs, and dynamic
+
         spec task ledger. Do not introduce live transaction broadcast, private-key
+
         handling, or unbounded network requirements.
+
+        '
     acceptance:
     - name: ABRA replay assessment fixture runs
       command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_replay_bundle --json >/tmp/abra_replay_assess.json
@@ -204,6 +202,58 @@ milestones:
       timeout_seconds: 120
     - name: ABRA replay focused tests pass
       command: python3 -m pytest -q tests/test_abra_replay_agent.py tests/test_abra_result_bundle.py tests/test_abra_replay_memory.py
+      required: true
+      timeout_seconds: 480
+    - name: ABRA dynamic spec audit passes
+      command: python3 -c "import sys; sys.path.insert(0, '/home/biostar/work/projects/engineering-harness/src'); from engineering_harness.cli import main; raise SystemExit(main(['spec-sync', 'audit', '--project-root', '.', '--json']))" >/tmp/abra_spec_sync_audit.json
+      required: true
+      timeout_seconds: 120
+- id: abra-ara-contract-alignment
+  title: ABRA ARA Contract Alignment
+  status: active
+  objective: Prove that ABRA can emit conservative result bundles consumable by public ARA drafting/report flows without overstating replay evidence or static findings.
+  tasks:
+  - id: ABRA-ARA-001
+    title: Keep ABRA bundles consumable by public ARA drafting/reporting
+    status: pending
+    max_attempts: 2
+    max_task_iterations: 3
+    manual_approval_required: false
+    file_scope:
+    - abra/**
+    - tools/**
+    - tests/**
+    - docs/**
+    - research_lab.yaml
+    - .engineering/spec_tasks.yaml
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex aligns ABRA bundles with ARA consumption contract
+      executor: codex
+      timeout_seconds: 5400
+      no_progress_timeout_seconds: 900
+      requested_capabilities:
+      - agent
+      prompt: 'Implement ABRA dynamic spec task ABRA-ARA-001. Add a deterministic cross-repo smoke proving public ARA can validate and consume an ABRA bundle without treating static alerts or replay-feasibility output as successful exploit replay. Keep implementation local and conservative: no private keys, no transaction broadcast, no live exploitation. Update bundle emission/metadata, drafting_brief or limitations mapping if needed, add focused tests, and record the evidence in dynamic spec tracking. Do not edit the ARA repository; use it only as an external consumer in acceptance commands.'
+    repair:
+    - name: codex repairs ABRA ARA contract alignment
+      executor: codex
+      timeout_seconds: 2400
+      no_progress_timeout_seconds: 600
+      requested_capabilities:
+      - agent
+      prompt: Repair ABRA-ARA-001 from failing acceptance evidence. Keep changes scoped to ABRA bundle metadata, tests, docs, and spec tracking. Do not introduce live replay, private-key handling, or direct edits to ARA.
+    acceptance:
+    - name: ABRA replay assessment emits a bundle for ARA consumption
+      command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_ara_bundle --json >/tmp/abra_ara_assess.json
+      required: true
+      timeout_seconds: 240
+    - name: Public ARA validates the emitted ABRA bundle
+      command: python3 tools/ara_bundle_validate.py /tmp/abra_ara_bundle --json >/tmp/abra_ara_bundle_validate.json
+      required: true
+      timeout_seconds: 180
+    - name: ABRA ARA contract tests pass
+      command: python3 -m pytest -q tests/test_abra_result_bundle.py tests/test_abra_cli.py
       required: true
       timeout_seconds: 480
     - name: ABRA dynamic spec audit passes
