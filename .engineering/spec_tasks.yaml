@@ -1,0 +1,69 @@
+{
+  "kind": "abra.spec_tasks.v1",
+  "project": "abra",
+  "updated_at": "2026-05-19T00:00:00Z",
+  "source_spec": "docs/abra_full_refactor_spec.zh.md",
+  "status_doc": "docs/abra_implementation_status.zh.md",
+  "decision_log_dir": "docs/decisions",
+  "requirements": [
+    {"id": "REQ-ABRA-GOV-001", "title": "Dynamic spec governance", "status": "completed"},
+    {"id": "REQ-ABRA-MANIFEST-001", "title": "ARA-compatible research lab manifest and CLI", "status": "completed"},
+    {"id": "REQ-ABRA-BUNDLE-001", "title": "ABRA result bundle contract", "status": "completed"},
+    {"id": "REQ-ABRA-EVIDENCE-001", "title": "Evidence levels and validation", "status": "completed"},
+    {"id": "REQ-ABRA-REPLAY-001", "title": "Replay feasibility and bounded replay evidence", "status": "partial"},
+    {"id": "REQ-ABRA-AGENT-001", "title": "Blockchain research agent loop", "status": "partial"},
+    {"id": "REQ-ABRA-MEMORY-001", "title": "Incident, finding, and replay memory", "status": "pending"},
+    {"id": "REQ-ABRA-ARA-001", "title": "ARA-facing integration contract", "status": "partial"}
+  ],
+  "tasks": [
+    {
+      "id": "ABRA-SPEC-GOV-001",
+      "title": "Install ABRA dynamic spec governance files",
+      "status": "completed",
+      "requirement_ids": ["REQ-ABRA-GOV-001"],
+      "evidence": [
+        {"kind": "doc", "path": "docs/abra_implementation_status.zh.md"},
+        {"kind": "doc", "path": "docs/decisions/2026-05-19-spec-governance.zh.md"}
+      ],
+      "next_action": "Use engineering-harness spec-sync after each ABRA task or stage."
+    },
+    {
+      "id": "ABRA-MANIFEST-001",
+      "title": "Keep research_lab manifest and CLI smoke current",
+      "status": "completed",
+      "requirement_ids": ["REQ-ABRA-MANIFEST-001"],
+      "evidence": [
+        {"kind": "command", "value": "python3 -m abra labs inspect --json"},
+        {"kind": "test", "value": "python3 -m pytest -q tests/test_abra_manifest.py tests/test_abra_cli.py"}
+      ],
+      "next_action": "Update whenever ARA lab contract changes."
+    },
+    {
+      "id": "ABRA-BUNDLE-001",
+      "title": "Maintain ABRA result bundle builder and validator",
+      "status": "completed",
+      "requirement_ids": ["REQ-ABRA-BUNDLE-001", "REQ-ABRA-EVIDENCE-001"],
+      "evidence": [
+        {"kind": "command", "value": "python3 -m abra bundle build --source reports --out /tmp/abra_result_bundle --json"},
+        {"kind": "command", "value": "python3 -m abra bundle validate /tmp/abra_result_bundle --json"}
+      ],
+      "next_action": "Map more historical reports into structured limitations and evidence claims."
+    },
+    {
+      "id": "ABRA-REPLAY-001",
+      "title": "Extend replay evidence agent beyond fixture MVP",
+      "status": "pending",
+      "requirement_ids": ["REQ-ABRA-REPLAY-001", "REQ-ABRA-AGENT-001", "REQ-ABRA-MEMORY-001"],
+      "evidence": [],
+      "next_action": "Create replay blocker ledger and bounded archive-RPC validation workflow."
+    },
+    {
+      "id": "ABRA-ARA-001",
+      "title": "Keep ABRA bundles consumable by public ARA drafting/reporting",
+      "status": "pending",
+      "requirement_ids": ["REQ-ABRA-ARA-001"],
+      "evidence": [],
+      "next_action": "Add cross-repo smoke that ARA can read an ABRA result bundle without treating static alerts as replayed exploits."
+    }
+  ]
+}

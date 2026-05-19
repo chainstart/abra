@@ -923,3 +923,20 @@ ABRA: Automated Blockchain Research Agents
 这兼顾了命令行简洁性、ARA/AMRA 命名一致性和外部可理解性。
 
 重构方式建议是原仓库内彻底重构，然后再改名。不要新建空白仓库，也不要先改物理仓库名。最关键的是先让 ABRA 在真实的区块链安全实验环境里跑出一个可审计的 agent 闭环：目标、计划、工具调用、观察、证据、记忆、报告、ARA bundle。
+
+## 22. Spec 动态维护规则
+
+ABRA 的重构 spec 不再只作为一次性设计文档使用。后续开发必须同步维护以下文件：
+
+- `.engineering/spec_tasks.yaml`：机器可读任务台账，记录 requirement、任务状态、证据和下一步。
+- `docs/abra_implementation_status.zh.md`：人工可读实现状态矩阵，解释哪些 requirement 已完成、部分完成或待开发。
+- `docs/decisions/`：架构决策记录，说明为何改变 spec、任务或仓库边界。
+- `docs/spec_update_log.jsonl`：由 engineering-harness 或人工工具追加的动态更新日志。
+
+维护要求：
+
+1. 新增需求时，必须先分配稳定的 `REQ-ABRA-*` ID，再进入任务台账。
+2. 完成一个任务或阶段后，必须记录可验证证据，例如测试命令、CLI 输出、bundle 路径、报告路径或 replay 结果。
+3. 未完成或失败的任务不能只留在聊天记录里，必须写入台账的 blocker、next_action 或后续任务。
+4. ARA 或 engineering-harness 调用 ABRA 开发任务时，应在任务结束后运行 spec 同步工具，更新 `.engineering/spec_tasks.yaml` 和 `docs/spec_update_log.jsonl`。
+5. 静态分析告警、local replay、fork replay、audit-ready 证据必须继续按 evidence level 区分，不能因为任务完成而提升证据级别。
