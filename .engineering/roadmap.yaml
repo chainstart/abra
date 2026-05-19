@@ -142,13 +142,13 @@ milestones:
       timeout_seconds: 360
 - id: abra-next-spec-development
   title: ABRA Next Spec Development
-  status: active
+  status: completed
   objective: Complete the next ABRA dynamic-spec task by extending replay evidence
     beyond the bounded fixture MVP while preserving deterministic, local safety.
   tasks:
   - id: ABRA-REPLAY-001
     title: Extend replay evidence agent beyond fixture MVP
-    status: pending
+    status: completed
     max_attempts: 2
     max_task_iterations: 3
     manual_approval_required: false

@@ -17,12 +17,24 @@ from tools.replay_runner import ReplayResult, classify_failure
 
 
 REPLAY_CASE_FIXTURE_SCHEMA_VERSION = "abra.replay_case_fixture.v1"
-REPLAY_FEASIBILITY_REPORT_SCHEMA_VERSION = "abra.replay_feasibility_report.v1"
+REPLAY_FEASIBILITY_REPORT_SCHEMA_VERSION = "abra.replay_feasibility_report.v2"
+REPLAY_BLOCKER_LEDGER_SCHEMA_VERSION = "abra.replay_blocker_ledger.v1"
+ARCHIVE_RPC_VALIDATION_SCHEMA_VERSION = "abra.archive_rpc_validation.v1"
+REPLAY_RUN_LEDGER_ENTRY_SCHEMA_VERSION = "abra.replay_run_ledger.entry.v1"
+REPLAY_MEMORY_LEDGER_SCHEMA_VERSION = "abra.replay_memory_ledger.v1"
 REPLAY_ASSESSMENT_SCHEMA_VERSION = "abra.replay_assessment.build.v1"
 EVIDENCE_VALIDATION_SCHEMA_VERSION = "abra.evidence.validation.v1"
 REPLAY_BUNDLE_TYPE = "abra_replay_evidence_bundle"
 EVIDENCE_ORDER = {level: index for index, level in enumerate(EVIDENCE_LABELS)}
 DENIED_COMMAND_PATTERNS = ("--broadcast", "cast send", "PRIVATE_KEY")
+REQUIRED_BLOCKER_LEDGER_CATEGORIES = {
+    "archive_rpc_state",
+    "trace_availability",
+    "fork_block_gap",
+    "simulation_precondition",
+    "safety_decision",
+}
+NON_EVM_CHAINS = {"eos", "sui", "terra"}
 
 
 def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str, Any]:
@@ -45,28 +57,75 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
     shutil.copy2(fixture_path, fixture_copy)
 
     global_env = _environment_map(fixture.get("environment"))
+    use_process_environment = bool(fixture.get("allow_process_environment"))
     assessments: list[dict[str, Any]] = []
     log_paths: list[Path] = []
     for index, raw_case in enumerate(cases, start=1):
-        assessment, log_path = _assess_case(raw_case, index, global_env, out_path)
+        assessment, log_path = _assess_case(raw_case, index, global_env, out_path, use_process_environment)
         assessments.append(assessment)
         if log_path is not None:
             log_paths.append(log_path)
 
-    report = _build_replay_report(
+    blocker_ledger = _build_blocker_ledger(
         generated_at=generated_at,
         fixture_path=fixture_path,
         fixture=fixture,
         assessments=assessments,
     )
+    archive_rpc_validation = _build_archive_rpc_validation(
+        generated_at=generated_at,
+        fixture_path=fixture_path,
+        fixture=fixture,
+        assessments=assessments,
+    )
+    report = _build_replay_report(
+        generated_at=generated_at,
+        fixture_path=fixture_path,
+        fixture=fixture,
+        assessments=assessments,
+        blocker_ledger=blocker_ledger,
+        archive_rpc_validation=archive_rpc_validation,
+    )
     report_json_path = out_path / "replay_feasibility_report.json"
     report_md_path = out_path / "replay_feasibility_report.md"
+    blocker_ledger_path = out_path / "replay_blocker_ledger.json"
+    archive_rpc_validation_path = out_path / "archive_rpc_validation.json"
     report_json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     report_md_path.write_text(_render_replay_report(report), encoding="utf-8")
+    blocker_ledger_path.write_text(json.dumps(blocker_ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    archive_rpc_validation_path.write_text(
+        json.dumps(archive_rpc_validation, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    run_ledger_path = out_path / "memory" / "replay_run_ledger.jsonl"
+    run_entry = _build_run_ledger_entry(
+        generated_at=generated_at,
+        fixture_path=fixture_path,
+        out_path=out_path,
+        fixture=fixture,
+        assessments=assessments,
+        blocker_ledger=blocker_ledger,
+        archive_rpc_validation=archive_rpc_validation,
+        existing_run_count=_jsonl_entry_count(run_ledger_path),
+    )
+    _append_jsonl(run_ledger_path, run_entry)
+    memory_ledger_path = out_path / "memory" / "replay_memory_ledger.json"
+    memory_ledger = _build_memory_ledger(generated_at, fixture_path, run_ledger_path)
+    memory_ledger_path.write_text(json.dumps(memory_ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     artifact_entries = [
         _artifact_entry(out_path, report_json_path, "replay_feasibility_report", "replay_assessment"),
         _artifact_entry(out_path, report_md_path, "replay_feasibility_report", "human_readable_replay_assessment"),
+        _artifact_entry(out_path, blocker_ledger_path, "replay_blocker_ledger", "blocker_index"),
+        _artifact_entry(
+            out_path,
+            archive_rpc_validation_path,
+            "archive_rpc_validation",
+            "bounded_archive_rpc_validation",
+        ),
+        _artifact_entry(out_path, run_ledger_path, "replay_run_ledger", "memory_run_index"),
+        _artifact_entry(out_path, memory_ledger_path, "replay_memory_ledger", "memory_summary"),
         _artifact_entry(out_path, fixture_copy, "replay_case_fixture", "input_fixture"),
     ]
     artifact_entries.extend(
@@ -82,6 +141,10 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         "generated_at": generated_at,
         "source_fixture": str(fixture_path),
         "replay_report": "replay_feasibility_report.json",
+        "blocker_ledger": "replay_blocker_ledger.json",
+        "archive_rpc_validation": "archive_rpc_validation.json",
+        "run_ledger": "memory/replay_run_ledger.jsonl",
+        "memory_ledger": "memory/replay_memory_ledger.json",
         "evidence_levels": EVIDENCE_LABELS,
         "claims": claims,
         "safety": report["safety"],
@@ -103,6 +166,10 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
     files_written = [
         "replay_feasibility_report.json",
         "replay_feasibility_report.md",
+        "replay_blocker_ledger.json",
+        "archive_rpc_validation.json",
+        "memory/replay_run_ledger.jsonl",
+        "memory/replay_memory_ledger.json",
         "evidence_bundle.json",
         "artifact_manifest.json",
     ]
@@ -116,6 +183,20 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         "case_count": len(assessments),
         "status_counts": _count_by_key(assessments, "replay_status"),
         "feasibility_counts": _count_by_key(assessments, "feasibility"),
+        "blocker_ledger": {
+            "path": "replay_blocker_ledger.json",
+            "entry_count": blocker_ledger["summary"]["entry_count"],
+            "category_counts": blocker_ledger["summary"]["category_counts"],
+        },
+        "archive_rpc_validation": {
+            "path": "archive_rpc_validation.json",
+            "mode": archive_rpc_validation["mode"],
+            "status_counts": archive_rpc_validation["summary"]["status_counts"],
+        },
+        "run_ledger": {
+            "path": "memory/replay_run_ledger.jsonl",
+            "run_id": run_entry["run_id"],
+        },
         "evidence_levels": _evidence_counts(claims),
         "files_written": files_written,
         "validation": validation,
@@ -169,6 +250,9 @@ def validate_evidence_bundle(bundle_path: str | Path, min_level: str = "L0") -> 
 
     if evidence.get("bundle_type") == REPLAY_BUNDLE_TYPE:
         _validate_replay_report(root, errors, warnings, files_checked)
+        _validate_replay_blocker_ledger(root, evidence, errors, warnings, files_checked)
+        _validate_archive_rpc_validation(root, evidence, errors, warnings, files_checked)
+        _validate_replay_memory_ledgers(root, evidence, errors, warnings, files_checked)
 
     return _evidence_validation_payload(root, minimum, errors, warnings, files_checked, claims, artifacts)
 
@@ -178,6 +262,7 @@ def _assess_case(
     index: int,
     global_env: dict[str, bool],
     out_path: Path,
+    use_process_environment: bool,
 ) -> tuple[dict[str, Any], Path | None]:
     if not isinstance(raw_case, dict):
         raise ValueError(f"Replay fixture case {index} must be a mapping.")
@@ -192,7 +277,7 @@ def _assess_case(
     test_path = _optional_str(raw_case.get("test_path"))
     metadata_test = _optional_str(raw_case.get("metadata_test"))
     replay_test = _optional_str(raw_case.get("replay_test"))
-    env_present, env_source = _case_env_present(raw_case, global_env, rpc_env)
+    env_present, env_source = _case_env_present(raw_case, global_env, rpc_env, use_process_environment)
 
     command = str(result_data.get("command") or raw_case.get("command") or "")
     if not command and test_path and replay_test:
@@ -223,6 +308,12 @@ def _assess_case(
     evidence_level = "L4" if verified else "L1"
     log_path = _write_case_log(out_path, slug, log_text)
     bundle_log_path = str(log_path.relative_to(out_path)) if log_path else ""
+    trace = _trace_metadata(raw_case, result_data)
+    metadata_status = str(
+        result_data.get("metadata_status")
+        or raw_case.get("metadata_status")
+        or _metadata_status(test_path, metadata_test)
+    )
     replay_result = ReplayResult(
         incident=incident,
         slug=slug,
@@ -234,7 +325,7 @@ def _assess_case(
         test_path=test_path,
         replay_test=replay_test,
         status=status,
-        metadata_status=str(result_data.get("metadata_status") or raw_case.get("metadata_status") or _metadata_status(test_path, metadata_test)),
+        metadata_status=metadata_status,
         command=command,
         returncode=returncode if isinstance(returncode, int) else None,
         duration_seconds=float(result_data.get("duration_seconds") or raw_case.get("duration_seconds") or 0.0),
@@ -257,6 +348,17 @@ def _assess_case(
             }
         )
     failure_reason = _failure_reason(status, blocker, rpc_env)
+    simulation_preconditions = _simulation_preconditions(
+        chain=chain,
+        rpc_env=rpc_env,
+        env_present=env_present,
+        env_source=env_source,
+        fork_block=fork_block,
+        test_path=test_path,
+        replay_test=replay_test,
+        metadata_status=metadata_status,
+        safety_violations=safety_violations,
+    )
     assessment = {
         "case_id": f"replay-case-{index:04d}-{slug}",
         "incident": incident,
@@ -283,6 +385,8 @@ def _assess_case(
         "evidence_label": EVIDENCE_LABELS[evidence_level],
         "failure_reason": failure_reason,
         "required_environment": required_environment,
+        "trace": trace,
+        "simulation_preconditions": simulation_preconditions,
         "safety_violations": safety_violations,
         "log_path": bundle_log_path,
         "normalized_replay_result": asdict(replay_result),
@@ -296,6 +400,8 @@ def _build_replay_report(
     fixture_path: Path,
     fixture: dict[str, Any],
     assessments: list[dict[str, Any]],
+    blocker_ledger: dict[str, Any],
+    archive_rpc_validation: dict[str, Any],
 ) -> dict[str, Any]:
     verified = [case for case in assessments if case["verified"]]
     blocked = [case for case in assessments if not case["verified"]]
@@ -324,19 +430,518 @@ def _build_replay_report(
             "status_counts": _count_by_key(assessments, "replay_status"),
             "feasibility_counts": _count_by_key(assessments, "feasibility"),
             "evidence_level_counts": _count_by_key(assessments, "evidence_level"),
+            "blocker_category_counts": blocker_ledger["summary"]["category_counts"],
+            "archive_rpc_validation_status_counts": archive_rpc_validation["summary"]["status_counts"],
         },
         "safety": {
             "broadcasts_transactions": False,
             "requires_private_keys": False,
             "live_trading": False,
             "runs_forge": False,
+            "validation_mode": "deterministic_local",
             "notes": [
-                "This MVP assesses fixture-declared replay outcomes only.",
+                "This bounded workflow assesses fixture-declared replay outcomes and local validation preconditions only.",
                 "It does not broadcast transactions, require private keys, or perform live trading.",
             ],
         },
+        "blocker_ledger": "replay_blocker_ledger.json",
+        "archive_rpc_validation": "archive_rpc_validation.json",
+        "run_ledger": "memory/replay_run_ledger.jsonl",
         "claims_preview": claims_preview,
         "cases": assessments,
+    }
+
+
+def _build_blocker_ledger(
+    *,
+    generated_at: str,
+    fixture_path: Path,
+    fixture: dict[str, Any],
+    assessments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    for case in assessments:
+        entries.extend(_case_blocker_entries(case))
+
+    return {
+        "schema_version": REPLAY_BLOCKER_LEDGER_SCHEMA_VERSION,
+        "bundle_type": REPLAY_BUNDLE_TYPE,
+        "lab_id": "abra",
+        "generated_at": generated_at,
+        "source_fixture": str(fixture_path),
+        "fixture_id": fixture.get("fixture_id"),
+        "category_definitions": {
+            "archive_rpc_state": "Archive RPC configuration or historical state needed for fork replay.",
+            "trace_availability": "Transaction or execution traces needed to inspect replay behavior.",
+            "fork_block_gap": "Missing or ambiguous fork block / historical checkpoint.",
+            "simulation_precondition": "Local replay harness, metadata, and environment preconditions.",
+            "safety_decision": "Explicit decision to keep assessment non-broadcast and keyless.",
+        },
+        "summary": {
+            "case_count": len(assessments),
+            "entry_count": len(entries),
+            "open_blocker_count": sum(
+                1 for entry in entries if entry["status"] == "open" and entry["severity"] == "blocking"
+            ),
+            "category_counts": _count_by_key(entries, "category"),
+            "severity_counts": _count_by_key(entries, "severity"),
+            "status_counts": _count_by_key(entries, "status"),
+        },
+        "entries": entries,
+    }
+
+
+def _case_blocker_entries(case: dict[str, Any]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    failure_code = str(case.get("failure_reason", {}).get("code") or "")
+    env = _first_required_environment(case)
+    env_present = env.get("present") if env else None
+    rpc_env = str(env.get("name") or case.get("normalized_replay_result", {}).get("rpc_env") or "") if env else ""
+
+    if not env:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="archive_rpc_state",
+                code="archive_rpc_env_not_declared",
+                severity="warning",
+                status="open",
+                retryable=False,
+                message="No archive RPC environment variable is declared for this case.",
+                required_action="Declare the read-only archive RPC environment variable needed for live validation.",
+                details={"fork_block": case.get("fork_block")},
+            )
+        )
+    elif failure_code == "archive_state_unavailable":
+        entries.append(
+            _ledger_entry(
+                case,
+                category="archive_rpc_state",
+                code="archive_state_unavailable",
+                severity="blocking",
+                status="open",
+                retryable=True,
+                message="The configured RPC endpoint did not provide historical archive state for the fork block.",
+                required_action="Use an archive-capable RPC endpoint for the chain and fork block, then rerun bounded replay.",
+                details={"rpc_env": rpc_env, "fork_block": case.get("fork_block"), "source": env.get("source") if env else ""},
+            )
+        )
+    elif env and env_present is False:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="archive_rpc_state",
+                code="missing_archive_rpc_env",
+                severity="blocking",
+                status="open",
+                retryable=True,
+                message=f"Required archive RPC environment variable is unavailable: {rpc_env}.",
+                required_action="Configure a read-only archive-capable RPC endpoint before live fork validation.",
+                details={"rpc_env": rpc_env, "fork_block": case.get("fork_block"), "source": env.get("source")},
+            )
+        )
+    elif env:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="archive_rpc_state",
+                code="archive_rpc_fixture_declared",
+                severity="info",
+                status="fixture_declared",
+                retryable=False,
+                message=f"Fixture declares archive RPC availability through {rpc_env}.",
+                required_action="Use live read-only validation before upgrading beyond fixture evidence.",
+                details={"rpc_env": rpc_env, "fork_block": case.get("fork_block"), "source": env.get("source")},
+            )
+        )
+
+    trace = case.get("trace") if isinstance(case.get("trace"), dict) else {}
+    trace_status = str(trace.get("status") or "unavailable")
+    if trace_status in {"available", "declared"}:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="trace_availability",
+                code="trace_fixture_declared",
+                severity="info",
+                status="fixture_declared",
+                retryable=False,
+                message="Fixture declares trace or replay log availability for this case.",
+                required_action="Preserve trace artifacts in the bundle before using them as replay evidence.",
+                details=trace,
+            )
+        )
+    else:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="trace_availability",
+                code="trace_unavailable",
+                severity="warning",
+                status="open",
+                retryable=True,
+                message="No transaction or execution trace artifact is available in the local fixture.",
+                required_action="Collect read-only transaction traces or replay logs when archive RPC supports them.",
+                details=trace,
+            )
+        )
+
+    if case.get("fork_block") is None:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="fork_block_gap",
+                code="fork_block_not_declared",
+                severity="blocking",
+                status="open",
+                retryable=False,
+                message="The case does not declare a fork block or equivalent historical checkpoint.",
+                required_action="Add a fork block for EVM replay, or document a chain-specific checkpoint for non-EVM replay.",
+                details={"chain": case.get("chain"), "non_evm": case.get("chain") in NON_EVM_CHAINS},
+            )
+        )
+    else:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="fork_block_gap",
+                code="fork_block_declared",
+                severity="info",
+                status="fixture_declared",
+                retryable=False,
+                message="Fixture declares a fork block for bounded replay assessment.",
+                required_action="Verify the fork block against public incident transaction metadata before audit use.",
+                details={"fork_block": case.get("fork_block")},
+            )
+        )
+
+    missing_preconditions = [
+        item
+        for item in case.get("simulation_preconditions", [])
+        if isinstance(item, dict) and item.get("required") is True and item.get("satisfied") is not True
+    ]
+    if missing_preconditions:
+        for item in missing_preconditions:
+            entries.append(
+                _ledger_entry(
+                    case,
+                    category="simulation_precondition",
+                    code=str(item.get("name") or "simulation_precondition_missing"),
+                    severity="blocking",
+                    status="open",
+                    retryable=bool(item.get("retryable")),
+                    message=str(item.get("message") or "A required simulation precondition is not satisfied."),
+                    required_action=str(item.get("required_action") or "Satisfy the missing precondition before replay."),
+                    details=item,
+                )
+            )
+    else:
+        entries.append(
+            _ledger_entry(
+                case,
+                category="simulation_precondition",
+                code="simulation_preconditions_satisfied",
+                severity="info",
+                status="fixture_declared",
+                retryable=False,
+                message="Fixture-declared simulation preconditions are satisfied for bounded local assessment.",
+                required_action="Run live read-only validation before treating this as non-fixture replay evidence.",
+                details={"preconditions": case.get("simulation_preconditions", [])},
+            )
+        )
+
+    safety_violations = list(case.get("safety_violations") or [])
+    entries.append(
+        _ledger_entry(
+            case,
+            category="safety_decision",
+            code="non_broadcast_keyless_validation" if not safety_violations else "unsafe_command_marker",
+            severity="info" if not safety_violations else "blocking",
+            status="accepted_safety_decision" if not safety_violations else "open",
+            retryable=False,
+            message="Assessment is explicitly limited to non-broadcast, keyless replay evidence handling."
+            if not safety_violations
+            else "Fixture command contains a denied broadcast, private-key, or live-send marker.",
+            required_action="Do not use private keys or broadcast transactions; use read-only archive RPC validation only."
+            if not safety_violations
+            else "Remove unsafe command markers before any replay assessment can be accepted.",
+            details={
+                "broadcasts_transactions": False,
+                "requires_private_keys": False,
+                "live_trading": False,
+                "runs_forge": False,
+                "denied_markers": safety_violations,
+            },
+        )
+    )
+    return entries
+
+
+def _ledger_entry(
+    case: dict[str, Any],
+    *,
+    category: str,
+    code: str,
+    severity: str,
+    status: str,
+    retryable: bool,
+    message: str,
+    required_action: str,
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    slug = str(case.get("slug") or "case")
+    return {
+        "blocker_id": f"replay-blocker-{slug}-{_slug(category)}-{_slug(code)}",
+        "case_id": case.get("case_id"),
+        "slug": slug,
+        "incident": case.get("incident"),
+        "chain": case.get("chain"),
+        "category": category,
+        "code": code,
+        "severity": severity,
+        "status": status,
+        "retryable": retryable,
+        "message": message,
+        "required_action": required_action,
+        "evidence_level": case.get("evidence_level"),
+        "replay_status": case.get("replay_status"),
+        "feasibility": case.get("feasibility"),
+        "details": details,
+    }
+
+
+def _build_archive_rpc_validation(
+    *,
+    generated_at: str,
+    fixture_path: Path,
+    fixture: dict[str, Any],
+    assessments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    checks = [_archive_rpc_case_validation(case) for case in assessments]
+    return {
+        "schema_version": ARCHIVE_RPC_VALIDATION_SCHEMA_VERSION,
+        "bundle_type": REPLAY_BUNDLE_TYPE,
+        "lab_id": "abra",
+        "generated_at": generated_at,
+        "source_fixture": str(fixture_path),
+        "fixture_id": fixture.get("fixture_id"),
+        "mode": "deterministic_local",
+        "deterministic": True,
+        "network_access": "not_used",
+        "private_keys": "not_used",
+        "broadcasts_transactions": False,
+        "summary": {
+            "case_count": len(checks),
+            "status_counts": _count_by_key(checks, "local_status"),
+            "live_ready_count": sum(1 for check in checks if check["local_status"] == "fixture_declared_replay_verified"),
+        },
+        "live_validation_requirements": [
+            "Archive-capable read-only RPC endpoint for each chain and fork block.",
+            "Foundry test dependencies and the declared replay test path.",
+            "Historical state calls only; optional debug_trace/trace calls when the provider supports them.",
+            "No transaction broadcast, private keys, live trading, or state-changing RPC calls.",
+        ],
+        "prohibited_actions": [
+            "Do not pass --broadcast to forge or cast.",
+            "Do not load or request private keys.",
+            "Do not use cast send or any state-changing transaction command.",
+        ],
+        "checks": checks,
+    }
+
+
+def _archive_rpc_case_validation(case: dict[str, Any]) -> dict[str, Any]:
+    env = _first_required_environment(case)
+    failure_code = str(case.get("failure_reason", {}).get("code") or "")
+    local_status = _archive_rpc_validation_status(case, env, failure_code)
+    command = str(case.get("runner", {}).get("command") or "")
+    return {
+        "validation_id": f"archive-rpc-validation-{case['slug']}",
+        "case_id": case["case_id"],
+        "slug": case["slug"],
+        "incident": case["incident"],
+        "chain": case["chain"],
+        "fork_block": case.get("fork_block"),
+        "rpc_env": env.get("name") if env else "",
+        "local_status": local_status,
+        "basis": "fixture_metadata_only",
+        "checks": [
+            {
+                "name": "rpc_env_declared",
+                "passed": bool(env),
+                "source": env.get("source") if env else "not_declared",
+            },
+            {
+                "name": "rpc_env_fixture_present",
+                "passed": bool(env and env.get("present") is True),
+                "source": env.get("source") if env else "not_declared",
+            },
+            {
+                "name": "fork_block_declared",
+                "passed": case.get("fork_block") is not None,
+                "source": "fixture.case.fork_block",
+            },
+            {
+                "name": "replay_test_declared",
+                "passed": bool(case.get("runner", {}).get("test_path") and case.get("runner", {}).get("replay_test")),
+                "source": "fixture.case.replay_test",
+            },
+            {
+                "name": "non_broadcast_safety",
+                "passed": not case.get("safety_violations"),
+                "source": "abra.replay_agent.safety_policy",
+            },
+        ],
+        "read_only_live_steps": _live_validation_steps(case, env, command),
+        "live_validation_requires": _live_validation_requirements_for_case(case, env),
+        "prohibited_actions": ["broadcast_transactions", "load_private_keys", "live_trading"],
+        "notes": [
+            "Local deterministic validation does not contact RPC endpoints.",
+            "Live validation would be read-only and must keep evidence levels bounded until replay succeeds.",
+        ],
+    }
+
+
+def _archive_rpc_validation_status(case: dict[str, Any], env: dict[str, Any] | None, failure_code: str) -> str:
+    if case.get("safety_violations"):
+        return "blocked_unsafe_command"
+    if not case.get("runner", {}).get("test_path") or not case.get("runner", {}).get("replay_test"):
+        return "blocked_missing_replay_test"
+    if case.get("fork_block") is None:
+        return "blocked_missing_fork_block"
+    if env and env.get("present") is False:
+        return "blocked_missing_archive_rpc"
+    if failure_code == "archive_state_unavailable":
+        return "blocked_archive_state_unavailable"
+    if case.get("verified"):
+        return "fixture_declared_replay_verified"
+    return "not_live_validated"
+
+
+def _live_validation_steps(case: dict[str, Any], env: dict[str, Any] | None, command: str) -> list[str]:
+    steps = [
+        "Confirm the RPC endpoint is archive-capable for the declared fork block using read-only calls.",
+        "Run the declared Foundry replay test in a forked local EVM without --broadcast.",
+        "Store replay logs, command metadata, return code, and trace availability in the evidence bundle.",
+    ]
+    if env:
+        steps.insert(0, f"Configure {env.get('name')} with a read-only archive RPC URL.")
+    if command:
+        steps.append(f"Bounded local command shape: {command}")
+    return steps
+
+
+def _live_validation_requirements_for_case(case: dict[str, Any], env: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "archive_rpc_env": env.get("name") if env else "",
+        "chain": case.get("chain"),
+        "fork_block": case.get("fork_block"),
+        "test_path": case.get("runner", {}).get("test_path"),
+        "replay_test": case.get("runner", {}).get("replay_test"),
+        "trace_support": "optional_debug_or_trace_api",
+        "private_key_required": False,
+        "broadcast_required": False,
+    }
+
+
+def _build_run_ledger_entry(
+    *,
+    generated_at: str,
+    fixture_path: Path,
+    out_path: Path,
+    fixture: dict[str, Any],
+    assessments: list[dict[str, Any]],
+    blocker_ledger: dict[str, Any],
+    archive_rpc_validation: dict[str, Any],
+    existing_run_count: int,
+) -> dict[str, Any]:
+    run_id = _run_id(generated_at, fixture_path, out_path, existing_run_count + 1)
+    return {
+        "schema_version": REPLAY_RUN_LEDGER_ENTRY_SCHEMA_VERSION,
+        "run_id": run_id,
+        "generated_at": generated_at,
+        "bundle_type": REPLAY_BUNDLE_TYPE,
+        "bundle_path": str(out_path),
+        "source_fixture": str(fixture_path),
+        "fixture_id": fixture.get("fixture_id"),
+        "artifacts": {
+            "replay_report": "replay_feasibility_report.json",
+            "blocker_ledger": "replay_blocker_ledger.json",
+            "archive_rpc_validation": "archive_rpc_validation.json",
+            "evidence_bundle": "evidence_bundle.json",
+            "artifact_manifest": "artifact_manifest.json",
+        },
+        "case_count": len(assessments),
+        "status_counts": _count_by_key(assessments, "replay_status"),
+        "feasibility_counts": _count_by_key(assessments, "feasibility"),
+        "evidence_levels": _count_by_key(assessments, "evidence_level"),
+        "blocker_summary": blocker_ledger["summary"],
+        "archive_rpc_validation_summary": archive_rpc_validation["summary"],
+        "safety": {
+            "broadcasts_transactions": False,
+            "requires_private_keys": False,
+            "live_trading": False,
+            "validation_mode": "deterministic_local",
+        },
+        "cases": [
+            {
+                "case_id": case["case_id"],
+                "slug": case["slug"],
+                "incident": case["incident"],
+                "chain": case["chain"],
+                "replay_status": case["replay_status"],
+                "feasibility": case["feasibility"],
+                "evidence_level": case["evidence_level"],
+                "failure_code": case["failure_reason"]["code"],
+            }
+            for case in assessments
+        ],
+    }
+
+
+def _build_memory_ledger(generated_at: str, fixture_path: Path, run_ledger_path: Path) -> dict[str, Any]:
+    runs = _read_jsonl_objects(run_ledger_path)
+    incidents: list[dict[str, Any]] = []
+    for run in runs:
+        for case in run.get("cases", []):
+            if isinstance(case, dict):
+                incidents.append(
+                    {
+                        "run_id": run.get("run_id"),
+                        "case_id": case.get("case_id"),
+                        "slug": case.get("slug"),
+                        "incident": case.get("incident"),
+                        "chain": case.get("chain"),
+                        "replay_status": case.get("replay_status"),
+                        "feasibility": case.get("feasibility"),
+                        "evidence_level": case.get("evidence_level"),
+                        "failure_code": case.get("failure_code"),
+                    }
+                )
+    return {
+        "schema_version": REPLAY_MEMORY_LEDGER_SCHEMA_VERSION,
+        "bundle_type": REPLAY_BUNDLE_TYPE,
+        "lab_id": "abra",
+        "generated_at": generated_at,
+        "source_fixture": str(fixture_path),
+        "run_ledger": str(run_ledger_path.name),
+        "summary": {
+            "run_count": len(runs),
+            "incident_observation_count": len(incidents),
+            "latest_run_id": runs[-1].get("run_id") if runs else "",
+        },
+        "runs": [
+            {
+                "run_id": run.get("run_id"),
+                "generated_at": run.get("generated_at"),
+                "case_count": run.get("case_count"),
+                "status_counts": run.get("status_counts"),
+                "evidence_levels": run.get("evidence_levels"),
+                "blocker_summary": run.get("blocker_summary"),
+            }
+            for run in runs
+        ],
+        "incidents": incidents,
     }
 
 
@@ -346,11 +951,14 @@ def _build_claims(
     artifact_by_path: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     report_id = artifact_by_path["replay_feasibility_report.json"]["artifact_id"]
+    blocker_ledger_id = artifact_by_path["replay_blocker_ledger.json"]["artifact_id"]
+    archive_validation_id = artifact_by_path["archive_rpc_validation.json"]["artifact_id"]
+    run_ledger_id = artifact_by_path["memory/replay_run_ledger.jsonl"]["artifact_id"]
     fixture_artifact = next(artifact for artifact in artifacts if artifact["kind"] == "replay_case_fixture")
     fixture_id = fixture_artifact["artifact_id"]
     claims: list[dict[str, Any]] = []
     for case in assessments:
-        supported_by = [report_id, fixture_id]
+        supported_by = [report_id, fixture_id, blocker_ledger_id, archive_validation_id, run_ledger_id]
         if case.get("log_path") and case["log_path"] in artifact_by_path:
             supported_by.append(artifact_by_path[case["log_path"]]["artifact_id"])
         if case["verified"]:
@@ -528,6 +1136,167 @@ def _validate_replay_report(
         warnings.append("Replay report does not include a no_rpc fixture case.")
 
 
+def _validate_replay_blocker_ledger(
+    root: Path,
+    evidence: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    files_checked: list[str],
+) -> None:
+    relative = str(evidence.get("blocker_ledger") or "replay_blocker_ledger.json")
+    ledger = _load_bundle_json(root / relative, errors)
+    if not ledger:
+        errors.append(f"Replay evidence bundle is missing blocker ledger: {relative}")
+        return
+    files_checked.append(relative)
+    if ledger.get("schema_version") != REPLAY_BLOCKER_LEDGER_SCHEMA_VERSION:
+        errors.append("replay_blocker_ledger.json has an unsupported schema_version.")
+    entries = ledger.get("entries")
+    if not isinstance(entries, list) or not entries:
+        errors.append("Replay blocker ledger must contain at least one entry.")
+        return
+    categories = {str(entry.get("category") or "") for entry in entries if isinstance(entry, dict)}
+    missing_categories = sorted(REQUIRED_BLOCKER_LEDGER_CATEGORIES - categories)
+    if missing_categories:
+        errors.append(f"Replay blocker ledger is missing required categories: {missing_categories}")
+    seen: set[str] = set()
+    safety_decisions = 0
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            errors.append(f"Replay blocker ledger entry {index} must be a mapping.")
+            continue
+        blocker_id = str(entry.get("blocker_id") or "")
+        if not blocker_id:
+            errors.append(f"Replay blocker ledger entry {index} is missing blocker_id.")
+        elif blocker_id in seen:
+            errors.append(f"Duplicate replay blocker ledger entry: {blocker_id}")
+        seen.add(blocker_id)
+        for key in ("case_id", "category", "code", "severity", "status", "message", "required_action"):
+            if key not in entry:
+                errors.append(f"Replay blocker ledger entry {blocker_id or index} is missing `{key}`.")
+        if entry.get("category") == "safety_decision":
+            safety_decisions += 1
+            details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+            if details.get("broadcasts_transactions") is not False:
+                errors.append(f"Safety ledger entry {blocker_id or index} must declare broadcasts_transactions=false.")
+            if details.get("requires_private_keys") is not False:
+                errors.append(f"Safety ledger entry {blocker_id or index} must declare requires_private_keys=false.")
+    if safety_decisions == 0:
+        errors.append("Replay blocker ledger must include explicit non-broadcast safety decisions.")
+    if not any(
+        isinstance(entry, dict)
+        and entry.get("category") == "archive_rpc_state"
+        and entry.get("severity") == "blocking"
+        for entry in entries
+    ):
+        warnings.append("Replay blocker ledger does not include a blocking archive RPC state entry.")
+
+
+def _validate_archive_rpc_validation(
+    root: Path,
+    evidence: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    files_checked: list[str],
+) -> None:
+    relative = str(evidence.get("archive_rpc_validation") or "archive_rpc_validation.json")
+    validation = _load_bundle_json(root / relative, errors)
+    if not validation:
+        errors.append(f"Replay evidence bundle is missing archive RPC validation artifact: {relative}")
+        return
+    files_checked.append(relative)
+    if validation.get("schema_version") != ARCHIVE_RPC_VALIDATION_SCHEMA_VERSION:
+        errors.append("archive_rpc_validation.json has an unsupported schema_version.")
+    if validation.get("mode") != "deterministic_local":
+        errors.append("Archive RPC validation must run in deterministic_local mode.")
+    if validation.get("network_access") != "not_used":
+        errors.append("Archive RPC validation must not use network access in local mode.")
+    if validation.get("broadcasts_transactions") is not False:
+        errors.append("Archive RPC validation must declare broadcasts_transactions=false.")
+    if validation.get("private_keys") != "not_used":
+        errors.append("Archive RPC validation must declare private_keys=not_used.")
+    requirements = validation.get("live_validation_requirements")
+    if not isinstance(requirements, list) or not requirements:
+        errors.append("Archive RPC validation must describe live validation requirements.")
+    checks = validation.get("checks")
+    if not isinstance(checks, list) or not checks:
+        errors.append("Archive RPC validation must contain per-case checks.")
+        return
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            errors.append(f"Archive RPC validation check {index} must be a mapping.")
+            continue
+        if not check.get("validation_id"):
+            errors.append(f"Archive RPC validation check {index} is missing validation_id.")
+        if not check.get("local_status"):
+            errors.append(f"Archive RPC validation check {index} is missing local_status.")
+        live_requires = check.get("live_validation_requires")
+        if not isinstance(live_requires, dict):
+            errors.append(f"Archive RPC validation check {check.get('validation_id') or index} needs live requirements.")
+            continue
+        if live_requires.get("private_key_required") is not False:
+            errors.append(f"Archive RPC validation check {check.get('validation_id') or index} must not require private keys.")
+        if live_requires.get("broadcast_required") is not False:
+            errors.append(f"Archive RPC validation check {check.get('validation_id') or index} must not require broadcast.")
+    if not any(
+        isinstance(check, dict)
+        and str(check.get("local_status") or "").startswith("blocked_missing")
+        for check in checks
+    ):
+        warnings.append("Archive RPC validation does not include a missing-precondition case.")
+
+
+def _validate_replay_memory_ledgers(
+    root: Path,
+    evidence: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    files_checked: list[str],
+) -> None:
+    run_relative = str(evidence.get("run_ledger") or "memory/replay_run_ledger.jsonl")
+    run_path = root / run_relative
+    if not run_path.exists():
+        errors.append(f"Replay run ledger is missing: {run_relative}")
+        return
+    files_checked.append(run_relative)
+    runs: list[dict[str, Any]] = []
+    for line_no, line in enumerate(run_path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"Invalid JSON in replay run ledger line {line_no}: {exc}")
+            continue
+        if not isinstance(data, dict):
+            errors.append(f"Replay run ledger line {line_no} must be a JSON object.")
+            continue
+        runs.append(data)
+        if data.get("schema_version") != REPLAY_RUN_LEDGER_ENTRY_SCHEMA_VERSION:
+            errors.append(f"Replay run ledger line {line_no} has unsupported schema_version.")
+        safety = data.get("safety") if isinstance(data.get("safety"), dict) else {}
+        if safety.get("broadcasts_transactions") is not False:
+            errors.append(f"Replay run ledger line {line_no} must declare broadcasts_transactions=false.")
+        if safety.get("requires_private_keys") is not False:
+            errors.append(f"Replay run ledger line {line_no} must declare requires_private_keys=false.")
+    if not runs:
+        errors.append("Replay run ledger must contain at least one run entry.")
+
+    memory_relative = str(evidence.get("memory_ledger") or "memory/replay_memory_ledger.json")
+    memory = _load_bundle_json(root / memory_relative, errors)
+    if not memory:
+        errors.append(f"Replay memory ledger is missing: {memory_relative}")
+        return
+    files_checked.append(memory_relative)
+    if memory.get("schema_version") != REPLAY_MEMORY_LEDGER_SCHEMA_VERSION:
+        errors.append("replay_memory_ledger.json has an unsupported schema_version.")
+    summary = memory.get("summary") if isinstance(memory.get("summary"), dict) else {}
+    if summary.get("run_count") != len(runs):
+        errors.append("Replay memory ledger run_count does not match replay run ledger entries.")
+    if summary.get("incident_observation_count", 0) <= 0:
+        warnings.append("Replay memory ledger does not contain incident observations.")
+
+
 def _fixture_cases(fixture: dict[str, Any]) -> list[dict[str, Any]]:
     if fixture.get("schema_version") not in (None, REPLAY_CASE_FIXTURE_SCHEMA_VERSION):
         raise ValueError("Replay case fixture has an unsupported schema_version.")
@@ -563,6 +1332,135 @@ def _load_bundle_json(path: Path, errors: list[str]) -> dict[str, Any] | None:
     return data
 
 
+def _trace_metadata(raw_case: dict[str, Any], result_data: dict[str, Any]) -> dict[str, Any]:
+    raw_trace = raw_case.get("trace")
+    trace = dict(raw_trace) if isinstance(raw_trace, dict) else {}
+    result_trace = result_data.get("trace")
+    if isinstance(result_trace, dict):
+        trace.update(result_trace)
+    trace_path = _optional_str(trace.get("path") or raw_case.get("trace_path") or result_data.get("trace_path"))
+    status = _optional_str(trace.get("status") or raw_case.get("trace_status") or result_data.get("trace_status"))
+    if not status:
+        status = "available" if trace_path else "unavailable"
+    if trace.get("source"):
+        source = str(trace["source"])
+    elif isinstance(raw_trace, dict) or isinstance(result_trace, dict) or trace_path:
+        source = "fixture.trace"
+    else:
+        source = "not_declared"
+    return {
+        "status": status,
+        "path": trace_path,
+        "source": source,
+        "required_for_live_validation": True,
+        "note": str(
+            trace.get("note")
+            or (
+                "Trace artifact is declared by the fixture."
+                if status in {"available", "declared"}
+                else "No transaction or execution trace artifact is declared by the fixture."
+            )
+        ),
+    }
+
+
+def _simulation_preconditions(
+    *,
+    chain: str,
+    rpc_env: str,
+    env_present: bool,
+    env_source: str,
+    fork_block: Any,
+    test_path: str | None,
+    replay_test: str | None,
+    metadata_status: str,
+    safety_violations: list[str],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "replay_test_declared",
+            "required": True,
+            "satisfied": bool(test_path and replay_test),
+            "retryable": False,
+            "message": "No concrete replay test is declared for this case.",
+            "required_action": "Implement or declare a bounded replay test before simulation.",
+            "details": {"test_path": test_path, "replay_test": replay_test},
+        },
+        {
+            "name": "archive_rpc_env_configured",
+            "required": bool(rpc_env and test_path and replay_test),
+            "satisfied": bool(env_present),
+            "retryable": True,
+            "message": f"Archive RPC environment variable is unavailable: {rpc_env}.",
+            "required_action": "Configure a read-only archive RPC endpoint for fork replay.",
+            "details": {"rpc_env": rpc_env, "source": env_source},
+        },
+        {
+            "name": "fork_block_declared",
+            "required": chain not in NON_EVM_CHAINS and bool(test_path and replay_test),
+            "satisfied": fork_block is not None,
+            "retryable": False,
+            "message": "Fork block is missing for an EVM replay case.",
+            "required_action": "Add the incident fork block before replay validation.",
+            "details": {"fork_block": fork_block, "chain": chain},
+        },
+        {
+            "name": "metadata_or_compile_passed",
+            "required": bool(test_path and replay_test),
+            "satisfied": metadata_status in {"passed", "not_run", "not_declared"},
+            "retryable": True,
+            "message": "Metadata or compile precheck did not pass.",
+            "required_action": "Repair metadata or compile failures before replay validation.",
+            "details": {"metadata_status": metadata_status},
+        },
+        {
+            "name": "non_broadcast_command",
+            "required": True,
+            "satisfied": not safety_violations,
+            "retryable": False,
+            "message": "Replay command contains a denied broadcast/private-key marker.",
+            "required_action": "Remove denied live-transaction markers and keep replay read-only.",
+            "details": {"denied_markers": safety_violations},
+        },
+    ]
+
+
+def _first_required_environment(case: dict[str, Any]) -> dict[str, Any] | None:
+    env = case.get("required_environment")
+    if not isinstance(env, list):
+        return None
+    for item in env:
+        if isinstance(item, dict):
+            return item
+    return None
+
+
+def _append_jsonl(path: Path, entry: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def _read_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            rows.append(data)
+    return rows
+
+
+def _jsonl_entry_count(path: Path) -> int:
+    return len(_read_jsonl_objects(path))
+
+
 def _environment_map(value: Any) -> dict[str, bool]:
     if not isinstance(value, dict):
         return {}
@@ -573,7 +1471,12 @@ def _environment_map(value: Any) -> dict[str, bool]:
     return result
 
 
-def _case_env_present(raw_case: dict[str, Any], global_env: dict[str, bool], rpc_env: str) -> tuple[bool, str]:
+def _case_env_present(
+    raw_case: dict[str, Any],
+    global_env: dict[str, bool],
+    rpc_env: str,
+    use_process_environment: bool,
+) -> tuple[bool, str]:
     if not rpc_env:
         return False, "not_declared"
     case_env = _environment_map(raw_case.get("environment"))
@@ -581,7 +1484,9 @@ def _case_env_present(raw_case: dict[str, Any], global_env: dict[str, bool], rpc
         return case_env[rpc_env], "fixture.case.environment"
     if rpc_env in global_env:
         return global_env[rpc_env], "fixture.environment"
-    return bool(os.environ.get(rpc_env)), "process_environment"
+    if use_process_environment:
+        return bool(os.environ.get(rpc_env)), "process_environment"
+    return False, "deterministic_local_missing_fixture_environment"
 
 
 def _resolve_status(
@@ -684,7 +1589,7 @@ def _claim_limitations(case: dict[str, Any]) -> list[str]:
     if case["verified"]:
         return [
             "L4 means the fixture declares a successful local fork replay result; it is not evidence for adjacent exploit variants.",
-            "This MVP did not broadcast transactions or require private keys.",
+            "This bounded workflow did not broadcast transactions or require private keys.",
         ]
     return [
         "This claim records replay feasibility or a blocker, not exploit reproduction.",
@@ -736,6 +1641,12 @@ def _artifact_id(relative: Path) -> str:
     return f"artifact-{normalized}-{digest}"
 
 
+def _run_id(generated_at: str, fixture_path: Path, out_path: Path, run_number: int) -> str:
+    stamp = re.sub(r"[^0-9A-Za-z]+", "", generated_at)
+    digest = hashlib.sha256(f"{generated_at}|{fixture_path}|{out_path}|{run_number}".encode("utf-8")).hexdigest()[:10]
+    return f"replay-run-{stamp}-{run_number:04d}-{digest}"
+
+
 def _render_replay_report(report: dict[str, Any]) -> str:
     summary = report["summary"]
     lines = [
@@ -746,6 +1657,8 @@ def _render_replay_report(report: dict[str, Any]) -> str:
         f"- Verified fork replays: {summary['verified_count']}",
         f"- Blocked or unverified cases: {summary['blocked_count']}",
         f"- Status counts: `{summary['status_counts']}`",
+        f"- Blocker ledger: `{report['blocker_ledger']}`",
+        f"- Archive RPC validation: `{report['archive_rpc_validation']}`",
         "",
         "## Case Matrix",
         "",

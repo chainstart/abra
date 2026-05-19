@@ -30,13 +30,20 @@ def test_replay_fixture_assessment_writes_structured_bundle_without_mutating_fix
     bundle_dir = tmp_path / "replay_bundle"
     assert (bundle_dir / "replay_feasibility_report.json").exists()
     assert (bundle_dir / "replay_feasibility_report.md").exists()
+    assert (bundle_dir / "replay_blocker_ledger.json").exists()
+    assert (bundle_dir / "archive_rpc_validation.json").exists()
+    assert (bundle_dir / "memory" / "replay_run_ledger.jsonl").exists()
+    assert (bundle_dir / "memory" / "replay_memory_ledger.json").exists()
     assert (bundle_dir / "evidence_bundle.json").exists()
     assert (bundle_dir / "artifact_manifest.json").exists()
 
     report = json.loads((bundle_dir / "replay_feasibility_report.json").read_text(encoding="utf-8"))
     cases = {case["slug"]: case for case in report["cases"]}
+    assert report["blocker_ledger"] == "replay_blocker_ledger.json"
+    assert report["archive_rpc_validation"] == "archive_rpc_validation.json"
     assert report["safety"]["broadcasts_transactions"] is False
     assert report["safety"]["requires_private_keys"] is False
+    assert report["safety"]["validation_mode"] == "deterministic_local"
     assert cases["fixture-euler"]["evidence_level"] == "L4"
     assert cases["fixture-archive-blocked"]["failure_reason"]["code"] == "archive_state_unavailable"
     assert cases["fixture-archive-blocked"]["feasibility"] == "blocked_archive_rpc"
@@ -44,7 +51,43 @@ def test_replay_fixture_assessment_writes_structured_bundle_without_mutating_fix
     assert cases["fixture-missing-rpc"]["required_environment"][0]["name"] == "ETH_RPC_URL"
     assert cases["fixture-missing-rpc"]["required_environment"][0]["present"] is False
     assert cases["fixture-missing-test"]["failure_reason"]["code"] == "replay_test_not_implemented"
+    assert cases["fixture-missing-test"]["trace"]["status"] == "unavailable"
     assert all(not case["safety_violations"] for case in cases.values())
+
+
+def test_replay_blocker_ledger_and_archive_validation_are_serialized(tmp_path):
+    payload = assess_replay_fixture(FIXTURE_PATH, tmp_path / "replay_bundle")
+    bundle_dir = tmp_path / "replay_bundle"
+
+    ledger = json.loads((bundle_dir / "replay_blocker_ledger.json").read_text(encoding="utf-8"))
+    validation = json.loads((bundle_dir / "archive_rpc_validation.json").read_text(encoding="utf-8"))
+
+    assert payload["blocker_ledger"]["entry_count"] == ledger["summary"]["entry_count"]
+    assert {
+        "archive_rpc_state",
+        "trace_availability",
+        "fork_block_gap",
+        "simulation_precondition",
+        "safety_decision",
+    } <= set(ledger["summary"]["category_counts"])
+    entries = {(entry["slug"], entry["category"], entry["code"]): entry for entry in ledger["entries"]}
+    assert entries[("fixture-archive-blocked", "archive_rpc_state", "archive_state_unavailable")]["status"] == "open"
+    assert entries[("fixture-missing-rpc", "archive_rpc_state", "missing_archive_rpc_env")]["retryable"] is True
+    assert entries[("fixture-missing-test", "fork_block_gap", "fork_block_not_declared")]["severity"] == "blocking"
+    safety_entries = [entry for entry in ledger["entries"] if entry["category"] == "safety_decision"]
+    assert len(safety_entries) == 4
+    assert all(entry["details"]["broadcasts_transactions"] is False for entry in safety_entries)
+    assert all(entry["details"]["requires_private_keys"] is False for entry in safety_entries)
+
+    assert validation["mode"] == "deterministic_local"
+    assert validation["network_access"] == "not_used"
+    assert validation["broadcasts_transactions"] is False
+    assert validation["private_keys"] == "not_used"
+    assert validation["summary"]["status_counts"]["blocked_missing_archive_rpc"] == 1
+    missing_rpc = next(check for check in validation["checks"] if check["slug"] == "fixture-missing-rpc")
+    assert missing_rpc["live_validation_requires"]["archive_rpc_env"] == "ETH_RPC_URL"
+    assert missing_rpc["live_validation_requires"]["private_key_required"] is False
+    assert missing_rpc["live_validation_requires"]["broadcast_required"] is False
 
 
 def test_evidence_validator_accepts_replay_bundle_and_enforces_minimum_level(tmp_path):
@@ -57,10 +100,28 @@ def test_evidence_validator_accepts_replay_bundle_and_enforces_minimum_level(tmp
     assert validation["claim_count"] == 4
     assert validation["evidence_levels"] == {"L4": 1, "L1": 3}
     assert "replay_feasibility_report.json" in validation["files_checked"]
+    assert "replay_blocker_ledger.json" in validation["files_checked"]
+    assert "archive_rpc_validation.json" in validation["files_checked"]
+    assert "memory/replay_run_ledger.jsonl" in validation["files_checked"]
 
     strict_validation = validate_evidence_bundle(tmp_path / "replay_bundle", min_level="L4")
     assert strict_validation["status"] == "failed"
     assert any("below minimum evidence level L4" in error for error in strict_validation["errors"])
+
+
+def test_evidence_validator_rejects_replay_ledger_safety_regression(tmp_path):
+    bundle_dir = tmp_path / "replay_bundle"
+    assess_replay_fixture(FIXTURE_PATH, bundle_dir)
+    ledger_path = bundle_dir / "replay_blocker_ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    safety = next(entry for entry in ledger["entries"] if entry["category"] == "safety_decision")
+    safety["details"]["broadcasts_transactions"] = True
+    ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    validation = validate_evidence_bundle(bundle_dir, min_level="L1")
+
+    assert validation["status"] == "failed"
+    assert any("broadcasts_transactions=false" in error for error in validation["errors"])
 
 
 def test_replay_assess_and_evidence_validate_cli_round_trip(tmp_path):
