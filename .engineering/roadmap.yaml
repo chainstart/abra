@@ -140,6 +140,76 @@ milestones:
       command: python3 -m pytest -q tests/test_abra_replay_agent.py tests/test_abra_result_bundle.py
       required: true
       timeout_seconds: 360
+- id: abra-next-spec-development
+  title: ABRA Next Spec Development
+  status: active
+  objective: Complete the next ABRA dynamic-spec task by extending replay evidence
+    beyond the bounded fixture MVP while preserving deterministic, local safety.
+  tasks:
+  - id: ABRA-REPLAY-001
+    title: Extend replay evidence agent beyond fixture MVP
+    status: pending
+    max_attempts: 2
+    max_task_iterations: 3
+    manual_approval_required: false
+    file_scope:
+    - abra/**
+    - tools/**
+    - tests/**
+    - docs/**
+    - .engineering/spec_tasks.yaml
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex implements replay blocker ledger and bounded validation
+      executor: codex
+      timeout_seconds: 5400
+      no_progress_timeout_seconds: 900
+      requested_capabilities:
+      - agent
+      prompt: |
+        Implement ABRA dynamic spec task ABRA-REPLAY-001.
+
+        Extend the bounded replay evidence agent beyond the fixture MVP. Add a replay
+        blocker ledger that records missing archive-RPC state, unavailable traces,
+        fork-block gaps, simulation preconditions, and explicit non-broadcast safety
+        decisions. Add a bounded archive-RPC validation workflow that can run in a
+        deterministic local mode and can describe what live validation would require
+        without broadcasting transactions or using private keys.
+
+        Keep the implementation local and reviewable. Preserve existing reports and
+        historical chain-analysis artifacts. Add or update tests for blocker-ledger
+        serialization, replay assessment output, evidence validation, and memory/run
+        ledger persistence. Update docs and the dynamic spec task ledger/status so
+        ABRA-REPLAY-001 records the new evidence and remaining limits.
+    repair:
+    - name: codex repairs replay evidence task
+      executor: codex
+      timeout_seconds: 2400
+      no_progress_timeout_seconds: 600
+      requested_capabilities:
+      - agent
+      prompt: |
+        Repair ABRA-REPLAY-001 using the failing acceptance evidence. Keep changes
+        scoped to the replay evidence agent, blocker ledger, tests, docs, and dynamic
+        spec task ledger. Do not introduce live transaction broadcast, private-key
+        handling, or unbounded network requirements.
+    acceptance:
+    - name: ABRA replay assessment fixture runs
+      command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_replay_bundle --json >/tmp/abra_replay_assess.json
+      required: true
+      timeout_seconds: 240
+    - name: ABRA evidence validation runs
+      command: python3 -m abra evidence validate /tmp/abra_replay_bundle --min-level L1 --json >/tmp/abra_evidence_validate.json
+      required: true
+      timeout_seconds: 120
+    - name: ABRA replay focused tests pass
+      command: python3 -m pytest -q tests/test_abra_replay_agent.py tests/test_abra_result_bundle.py tests/test_abra_replay_memory.py
+      required: true
+      timeout_seconds: 480
+    - name: ABRA dynamic spec audit passes
+      command: python3 -c "import sys; sys.path.insert(0, '/home/biostar/work/projects/engineering-harness/src'); from engineering_harness.cli import main; raise SystemExit(main(['spec-sync', 'audit', '--project-root', '.', '--json']))" >/tmp/abra_spec_sync_audit.json
+      required: true
+      timeout_seconds: 120
 profile: python-agent
 project: abra
 report_dir: .engineering/reports/tasks
