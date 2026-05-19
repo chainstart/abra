@@ -262,12 +262,12 @@ milestones:
       timeout_seconds: 120
 - id: abra-multi-round-agent-loop
   title: ABRA Multi-Round Agent Loop
-  status: active
+  status: completed
   objective: Complete the ARA ecosystem ABRA-AGENT-001 direction by adding a bounded multi-round blockchain research agent loop, memory, and evidence review over existing local tools without live transactions or private keys.
   tasks:
   - id: ABRA-AGENT-001
     title: Add multi-round ABRA research agent loop and memory
-    status: pending
+    status: completed
     max_attempts: 2
     max_task_iterations: 3
     manual_approval_required: false

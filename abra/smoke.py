@@ -35,6 +35,11 @@ def build_smoke_report(manifest_path: str | Path | None = None) -> dict[str, Any
             message="ABRA declares the ARA-consumable result bundle type.",
         ),
         _check(
+            name="agent_bundle",
+            passed="abra_research_agent_bundle" in manifest.produced_bundles,
+            message="ABRA declares the bounded research agent bundle type.",
+        ),
+        _check(
             name="command_policy",
             passed=_command_policy_is_hardened(manifest),
             message="ABRA command policy allows local inspection and denies write-risk commands.",

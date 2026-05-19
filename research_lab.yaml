@@ -70,6 +70,20 @@ dispatch:
         - --json
       side_effect_free: true
       description: List ABRA's preserved domain tools.
+    agent-run-fixture:
+      argv:
+        - python3
+        - -m
+        - abra
+        - agent
+        - run
+        - --case-fixture
+        - tests/fixtures/replay_case.json
+        - --out
+        - /tmp/abra_agent_bundle
+        - --json
+      side_effect_free: false
+      description: Run the bounded local ABRA research agent loop over a replay fixture.
 
 environment:
   required: []
@@ -85,6 +99,7 @@ artifacts:
     - runs/*/artifact_manifest.json
     - runs/*/final_report.md
     - runs/*/abra_result_bundle/**
+    - runs/*/abra_research_agent_bundle/**
     - data/processed/*.csv
     - data/processed/*.json
     - reports/*.md
@@ -101,6 +116,7 @@ bundles:
   produced:
     - evidence_bundle
     - abra_result_bundle
+    - abra_research_agent_bundle
 
 evidence_levels:
   L0: hypothesis

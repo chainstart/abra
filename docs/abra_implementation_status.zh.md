@@ -26,8 +26,8 @@
 | `REQ-ABRA-BUNDLE-001` | `completed` | `python3 -m abra bundle build/validate`、`tests/test_abra_result_bundle.py` | 增加更多真实报告映射 | 扩展 artifact manifest 和 limitations |
 | `REQ-ABRA-EVIDENCE-001` | `completed` | evidence validator、L1/L4/L6 证据级别、replay assessment | L6 audit-ready 证据仍需真实 replay 支撑 | 增加真实 fork replay 证据 |
 | `REQ-ABRA-REPLAY-001` | `partial` | bounded replay assessment、replay blocker ledger、deterministic archive-RPC validation plan | 尚未对真实事件执行 live archive RPC replay；不能广播交易或使用私钥 | 在只读 archive RPC 环境中扩展真实 replay |
-| `REQ-ABRA-AGENT-001` | `partial` | replay/evidence agent MVP | 完整 plan-act-observe-reflect loop 和多 agent 分工不足 | 增加 agent state、tool registry、memory |
-| `REQ-ABRA-MEMORY-001` | `partial` | 历史 reports/findings/data 已保留；replay run ledger 和 memory summary 已写入 replay bundle | 尚缺 repo 级 incident/finding 长期 memory 迁移 | 扩展 memory schema 到 incident/finding/replay 跨运行索引 |
+| `REQ-ABRA-AGENT-001` | `completed` | `python3 -m abra agent run`、agent state、decision/observation/reflection ledgers、evidence review、ARA sidecar | 多 agent 分工仍未作为独立 executor 拆分 | 基于真实 replay fixture 扩展 agent action set |
+| `REQ-ABRA-MEMORY-001` | `partial` | 历史 reports/findings/data 已保留；replay run ledger、replay memory、agent run ledger 和 agent memory summary | 尚缺 repo 级 incident/finding 长期 memory 迁移 | 扩展 memory schema 到 incident/finding/replay 跨运行索引 |
 | `REQ-ABRA-ARA-001` | `partial` | result/replay bundle 生成 ARA sidecar；`tools/ara_bundle_validate.py` 可调用公开 ARA validate + drafting context | 需要随公开 ARA bundle/drafting contract 持续对齐；真实 replay 仍需只读 archive RPC | 保持跨仓库 ARA smoke |
 
 ## ABRA-REPLAY-001 更新
@@ -53,6 +53,24 @@ ABRA result bundle 和 replay assessment bundle 现在都会输出公开 ARA 消
 - `python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_ara_bundle --json >/tmp/abra_ara_assess.json`
 - `python3 tools/ara_bundle_validate.py /tmp/abra_ara_bundle --json >/tmp/abra_ara_bundle_validate.json`
 - `python3 -m pytest -q tests/test_abra_result_bundle.py tests/test_abra_cli.py`
+
+## ABRA-AGENT-001 更新
+
+`python3 -m abra agent run --case-fixture ... --out ...` 现在会执行 bounded/local 的 plan-act-observe-reflect loop：
+
+- round 1 读取 `research_lab.yaml` 和本地 tool inventory。
+- round 2 调用现有 `python3 -m abra replay assess` 等价逻辑，在 `replay_assessment/` 中生成 replay evidence bundle。
+- round 3 运行 evidence validation，生成 `evidence_review.json`，保留 L1/L4 evidence level 边界和 open blocker。
+- 每轮写入 `memory/agent_decision_ledger.jsonl`、`memory/agent_observation_ledger.jsonl`、`memory/agent_reflection_ledger.jsonl`。
+- 每次 run 追加 `memory/agent_run_ledger.jsonl` 并重建 `memory/agent_memory_ledger.json`。
+- bundle 根目录输出 `agent_run_state.json`、`final_report.md`、`evidence_bundle.json`、`artifact_manifest.json`、`bundle_manifest.json`、`claims.json`、`drafting_brief.md`、`limitations.md`，供 ARA 消费。
+
+安全边界：agent loop 不使用私钥、不广播交易、不做 live trading、不做 state-changing RPC；真实 replay 升级仍必须沿用只读 archive RPC 和 replay evidence validator。
+
+本任务的本地证据命令：
+
+- `python3 -m abra agent run --case-fixture tests/fixtures/replay_case.json --out /tmp/abra_agent_bundle --json`
+- `python3 -m pytest -q tests/test_abra_agent_loop.py tests/test_abra_cli.py`
 
 ## 维护流程
 
