@@ -20,6 +20,7 @@ def test_labs_inspect_cli_emits_manifest_contract(capsys):
     assert "abra_result_bundle" in payload["manifest"]["bundle_types"]
     assert "abra_research_agent_bundle" in payload["manifest"]["bundle_types"]
     assert "agent-run-fixture" in payload["manifest"]["dispatch_commands"]
+    assert "ara-production-replay-contract" in payload["manifest"]["dispatch_commands"]
 
 
 def test_python_module_labs_inspect_smoke_matches_harness_command():

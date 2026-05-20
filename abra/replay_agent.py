@@ -23,16 +23,27 @@ from tools.replay_runner import ReplayResult, classify_failure
 
 
 REPLAY_CASE_FIXTURE_SCHEMA_VERSION = "abra.replay_case_fixture.v1"
+ARCHIVE_RPC_PROFILE_SCHEMA_VERSION = "abra.archive_rpc_profile.v1"
+ARCHIVE_RPC_PREFLIGHT_SCHEMA_VERSION = "abra.archive_rpc_preflight.v1"
+ARCHIVE_REPLAY_TRACE_SCHEMA_VERSION = "abra.archive_replay_trace_fixture.v1"
 REPLAY_FEASIBILITY_REPORT_SCHEMA_VERSION = "abra.replay_feasibility_report.v2"
 REPLAY_BLOCKER_LEDGER_SCHEMA_VERSION = "abra.replay_blocker_ledger.v1"
 ARCHIVE_RPC_VALIDATION_SCHEMA_VERSION = "abra.archive_rpc_validation.v1"
+ARA_PRODUCTION_CONTRACT_SCHEMA_VERSION = "abra.ara_production_contract.v1"
 REPLAY_RUN_LEDGER_ENTRY_SCHEMA_VERSION = "abra.replay_run_ledger.entry.v1"
 REPLAY_MEMORY_LEDGER_SCHEMA_VERSION = "abra.replay_memory_ledger.v1"
 REPLAY_ASSESSMENT_SCHEMA_VERSION = "abra.replay_assessment.build.v1"
 EVIDENCE_VALIDATION_SCHEMA_VERSION = "abra.evidence.validation.v1"
 REPLAY_BUNDLE_TYPE = "abra_replay_evidence_bundle"
 EVIDENCE_ORDER = {level: index for index, level in enumerate(EVIDENCE_LABELS)}
-DENIED_COMMAND_PATTERNS = ("--broadcast", "cast send", "PRIVATE_KEY")
+DENIED_COMMAND_PATTERNS = (
+    "--broadcast",
+    "cast send",
+    "PRIVATE_KEY",
+    "private_key",
+    "private-key",
+    "eth_sendRawTransaction",
+)
 REQUIRED_BLOCKER_LEDGER_CATEGORIES = {
     "archive_rpc_state",
     "trace_availability",
@@ -43,9 +54,15 @@ REQUIRED_BLOCKER_LEDGER_CATEGORIES = {
 NON_EVM_CHAINS = {"eos", "sui", "terra"}
 
 
-def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str, Any]:
+def assess_replay_fixture(
+    case_fixture: str | Path,
+    out: str | Path,
+    archive_profile: str | Path | None = None,
+    profile: str | None = None,
+) -> dict[str, Any]:
     """Assess replay feasibility from a local fixture and write a replay evidence bundle."""
 
+    profile_name = _normalize_replay_profile(profile)
     fixture_path = Path(case_fixture).expanduser().resolve()
     out_path = Path(out).expanduser().resolve()
     if not fixture_path.exists() or not fixture_path.is_file():
@@ -53,6 +70,14 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
 
     fixture = _load_json_object(fixture_path)
     cases = _fixture_cases(fixture)
+    profile_path: Path | None = None
+    profile: dict[str, Any] | None = None
+    if archive_profile is not None:
+        profile_path = Path(archive_profile).expanduser().resolve()
+        if not profile_path.exists() or not profile_path.is_file():
+            raise FileNotFoundError(f"Archive RPC replay profile not found: {profile_path}")
+        profile = _load_archive_profile(profile_path)
+        cases = _apply_archive_profile(cases, profile)
     generated_at = _utc_now()
     out_path.mkdir(parents=True, exist_ok=True)
     artifacts_dir = out_path / "artifacts"
@@ -61,6 +86,11 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
     fixture_copy = artifacts_dir / "input" / fixture_path.name
     fixture_copy.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(fixture_path, fixture_copy)
+    profile_copy: Path | None = None
+    if profile_path is not None:
+        profile_copy = artifacts_dir / "input" / profile_path.name
+        profile_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(profile_path, profile_copy)
 
     global_env = _environment_map(fixture.get("environment"))
     use_process_environment = bool(fixture.get("allow_process_environment"))
@@ -72,6 +102,7 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         if log_path is not None:
             log_paths.append(log_path)
 
+    trace_paths = _write_archive_profile_trace_artifacts(out_path, generated_at, assessments)
     blocker_ledger = _build_blocker_ledger(
         generated_at=generated_at,
         fixture_path=fixture_path,
@@ -82,6 +113,13 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         generated_at=generated_at,
         fixture_path=fixture_path,
         fixture=fixture,
+        assessments=assessments,
+        archive_profile=profile,
+    )
+    archive_rpc_preflight = _build_archive_rpc_preflight(
+        generated_at=generated_at,
+        profile_path=profile_path,
+        profile=profile,
         assessments=assessments,
     )
     report = _build_replay_report(
@@ -96,6 +134,7 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
     report_md_path = out_path / "replay_feasibility_report.md"
     blocker_ledger_path = out_path / "replay_blocker_ledger.json"
     archive_rpc_validation_path = out_path / "archive_rpc_validation.json"
+    archive_rpc_preflight_path = out_path / "archive_rpc_preflight.json"
     report_json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     report_md_path.write_text(_render_replay_report(report), encoding="utf-8")
     blocker_ledger_path.write_text(json.dumps(blocker_ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -103,6 +142,11 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         json.dumps(archive_rpc_validation, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    if archive_rpc_preflight is not None:
+        archive_rpc_preflight_path.write_text(
+            json.dumps(archive_rpc_preflight, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     run_ledger_path = out_path / "memory" / "replay_run_ledger.jsonl"
     run_entry = _build_run_ledger_entry(
@@ -134,8 +178,18 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         _artifact_entry(out_path, memory_ledger_path, "replay_memory_ledger", "memory_summary"),
         _artifact_entry(out_path, fixture_copy, "replay_case_fixture", "input_fixture"),
     ]
+    if profile_copy is not None:
+        artifact_entries.append(_artifact_entry(out_path, profile_copy, "archive_rpc_profile", "input_profile"))
+    if archive_rpc_preflight is not None:
+        artifact_entries.append(
+            _artifact_entry(out_path, archive_rpc_preflight_path, "archive_rpc_preflight", "read_only_preflight")
+        )
     artifact_entries.extend(
         _artifact_entry(out_path, path, "replay_log", "fixture_replay_log") for path in sorted(log_paths)
+    )
+    artifact_entries.extend(
+        _artifact_entry(out_path, path, "archive_replay_trace", "fixture_trace_capture")
+        for path in sorted(trace_paths)
     )
 
     artifact_by_path = {entry["bundle_path"]: entry for entry in artifact_entries}
@@ -147,9 +201,11 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         "lab_id": "abra",
         "generated_at": generated_at,
         "source_fixture": str(fixture_path),
+        "archive_profile": str(profile_path) if profile_path else "",
         "replay_report": "replay_feasibility_report.json",
         "blocker_ledger": "replay_blocker_ledger.json",
         "archive_rpc_validation": "archive_rpc_validation.json",
+        "archive_rpc_preflight": "archive_rpc_preflight.json" if archive_rpc_preflight is not None else "",
         "run_ledger": "memory/replay_run_ledger.jsonl",
         "memory_ledger": "memory/replay_memory_ledger.json",
         "evidence_levels": EVIDENCE_LABELS,
@@ -160,6 +216,24 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
     evidence_path = out_path / "evidence_bundle.json"
     evidence_path.write_text(json.dumps(evidence_bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     artifact_entries.append(_artifact_entry(out_path, evidence_path, "evidence_bundle", "claim_index"))
+    ara_production_contract_path: Path | None = None
+    if profile_name == "ara-production":
+        ara_production_contract_path = out_path / "ara_production_contract.json"
+        ara_production_contract = _build_ara_production_contract(
+            generated_at=generated_at,
+            fixture_path=fixture_path,
+            claims=claims,
+            limitations=limitations,
+            archive_rpc_validation=archive_rpc_validation,
+            archive_rpc_preflight=archive_rpc_preflight,
+        )
+        ara_production_contract_path.write_text(
+            json.dumps(ara_production_contract, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        artifact_entries.append(
+            _artifact_entry(out_path, ara_production_contract_path, "ara_production_contract", "public_ara_gate")
+        )
 
     ara_files = _write_ara_contract_files(
         out_path=out_path,
@@ -168,6 +242,8 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         claims=claims,
         limitations=limitations,
         artifact_count=len(artifact_entries),
+        contract_profile=profile_name,
+        ara_production_contract="ara_production_contract.json" if ara_production_contract_path is not None else "",
     )
 
     artifact_manifest = {
@@ -190,14 +266,23 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
         "evidence_bundle.json",
         "artifact_manifest.json",
     ]
+    if archive_rpc_preflight is not None:
+        files_written.append("archive_rpc_preflight.json")
+    if profile_copy is not None:
+        files_written.append(str(profile_copy.relative_to(out_path)))
+    if ara_production_contract_path is not None:
+        files_written.append("ara_production_contract.json")
     files_written.extend(ara_files)
     files_written.extend(str(path.relative_to(out_path)) for path in sorted(log_paths))
+    files_written.extend(str(path.relative_to(out_path)) for path in sorted(trace_paths))
     payload = {
         "schema_version": REPLAY_ASSESSMENT_SCHEMA_VERSION,
         "status": "passed" if validation["status"] == "passed" else "failed",
         "bundle_type": REPLAY_BUNDLE_TYPE,
         "bundle_path": str(out_path),
         "source_fixture": str(fixture_path),
+        "profile": profile_name,
+        "archive_profile": str(profile_path) if profile_path else "",
         "case_count": len(assessments),
         "status_counts": _count_by_key(assessments, "replay_status"),
         "feasibility_counts": _count_by_key(assessments, "feasibility"),
@@ -210,6 +295,15 @@ def assess_replay_fixture(case_fixture: str | Path, out: str | Path) -> dict[str
             "path": "archive_rpc_validation.json",
             "mode": archive_rpc_validation["mode"],
             "status_counts": archive_rpc_validation["summary"]["status_counts"],
+        },
+        "archive_rpc_preflight": {
+            "path": "archive_rpc_preflight.json" if archive_rpc_preflight is not None else "",
+            "status": archive_rpc_preflight["status"] if archive_rpc_preflight is not None else "not_requested",
+        },
+        "ara_production_contract": {
+            "path": "ara_production_contract.json" if ara_production_contract_path is not None else "",
+            "profile": profile_name,
+            "status": "emitted" if ara_production_contract_path is not None else "not_requested",
         },
         "run_ledger": {
             "path": "memory/replay_run_ledger.jsonl",
@@ -270,6 +364,7 @@ def validate_evidence_bundle(bundle_path: str | Path, min_level: str = "L0") -> 
         _validate_replay_report(root, errors, warnings, files_checked)
         _validate_replay_blocker_ledger(root, evidence, errors, warnings, files_checked)
         _validate_archive_rpc_validation(root, evidence, errors, warnings, files_checked)
+        _validate_archive_rpc_preflight(root, evidence, errors, warnings, files_checked)
         _validate_replay_memory_ledgers(root, evidence, errors, warnings, files_checked)
 
     return _evidence_validation_payload(root, minimum, errors, warnings, files_checked, claims, artifacts)
@@ -327,6 +422,9 @@ def _assess_case(
     log_path = _write_case_log(out_path, slug, log_text)
     bundle_log_path = str(log_path.relative_to(out_path)) if log_path else ""
     trace = _trace_metadata(raw_case, result_data)
+    archive_profile_metadata = raw_case.get("_archive_profile")
+    if not isinstance(archive_profile_metadata, dict):
+        archive_profile_metadata = {}
     metadata_status = str(
         result_data.get("metadata_status")
         or raw_case.get("metadata_status")
@@ -404,6 +502,7 @@ def _assess_case(
         "failure_reason": failure_reason,
         "required_environment": required_environment,
         "trace": trace,
+        "archive_profile": archive_profile_metadata,
         "simulation_preconditions": simulation_preconditions,
         "safety_violations": safety_violations,
         "log_path": bundle_log_path,
@@ -423,6 +522,11 @@ def _build_replay_report(
 ) -> dict[str, Any]:
     verified = [case for case in assessments if case["verified"]]
     blocked = [case for case in assessments if not case["verified"]]
+    validation_mode = (
+        "production_local_archive_profile"
+        if any(case.get("archive_profile") for case in assessments)
+        else "deterministic_local"
+    )
     claims_preview = [
         {
             "case_id": case["case_id"],
@@ -456,7 +560,7 @@ def _build_replay_report(
             "requires_private_keys": False,
             "live_trading": False,
             "runs_forge": False,
-            "validation_mode": "deterministic_local",
+            "validation_mode": validation_mode,
             "notes": [
                 "This bounded workflow assesses fixture-declared replay outcomes and local validation preconditions only.",
                 "It does not broadcast transactions, require private keys, or perform live trading.",
@@ -734,8 +838,10 @@ def _build_archive_rpc_validation(
     fixture_path: Path,
     fixture: dict[str, Any],
     assessments: list[dict[str, Any]],
+    archive_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks = [_archive_rpc_case_validation(case) for case in assessments]
+    profile_enabled = archive_profile is not None
     return {
         "schema_version": ARCHIVE_RPC_VALIDATION_SCHEMA_VERSION,
         "bundle_type": REPLAY_BUNDLE_TYPE,
@@ -743,15 +849,21 @@ def _build_archive_rpc_validation(
         "generated_at": generated_at,
         "source_fixture": str(fixture_path),
         "fixture_id": fixture.get("fixture_id"),
-        "mode": "deterministic_local",
+        "profile_id": archive_profile.get("profile_id") if archive_profile else "",
+        "mode": "production_local_archive_profile" if profile_enabled else "deterministic_local",
         "deterministic": True,
-        "network_access": "not_used",
+        "network_access": "fixture_profile_only" if profile_enabled else "not_used",
         "private_keys": "not_used",
         "broadcasts_transactions": False,
+        "archive_rpc_preflight": "archive_rpc_preflight.json" if profile_enabled else "",
         "summary": {
             "case_count": len(checks),
             "status_counts": _count_by_key(checks, "local_status"),
-            "live_ready_count": sum(1 for check in checks if check["local_status"] == "fixture_declared_replay_verified"),
+            "live_ready_count": sum(
+                1
+                for check in checks
+                if check["local_status"] in {"fixture_declared_replay_verified", "profile_declared_replay_verified"}
+            ),
         },
         "live_validation_requirements": [
             "Archive-capable read-only RPC endpoint for each chain and fork block.",
@@ -831,6 +943,8 @@ def _archive_rpc_validation_status(case: dict[str, Any], env: dict[str, Any] | N
         return "blocked_missing_archive_rpc"
     if failure_code == "archive_state_unavailable":
         return "blocked_archive_state_unavailable"
+    if case.get("verified") and case.get("archive_profile"):
+        return "profile_declared_replay_verified"
     if case.get("verified"):
         return "fixture_declared_replay_verified"
     return "not_live_validated"
@@ -899,7 +1013,9 @@ def _build_run_ledger_entry(
             "broadcasts_transactions": False,
             "requires_private_keys": False,
             "live_trading": False,
-            "validation_mode": "deterministic_local",
+            "validation_mode": "production_local_archive_profile"
+            if any(case.get("archive_profile") for case in assessments)
+            else "deterministic_local",
         },
         "cases": [
             {
@@ -974,19 +1090,36 @@ def _build_claims(
     run_ledger_id = artifact_by_path["memory/replay_run_ledger.jsonl"]["artifact_id"]
     fixture_artifact = next(artifact for artifact in artifacts if artifact["kind"] == "replay_case_fixture")
     fixture_id = fixture_artifact["artifact_id"]
+    common_support = [
+        artifact["artifact_id"]
+        for artifact in artifacts
+        if artifact.get("kind") in {"archive_rpc_profile", "archive_rpc_preflight"}
+    ]
     claims: list[dict[str, Any]] = []
     for case in assessments:
         supported_by = [report_id, fixture_id, blocker_ledger_id, archive_validation_id, run_ledger_id]
+        supported_by.extend(common_support)
         if case.get("log_path") and case["log_path"] in artifact_by_path:
             supported_by.append(artifact_by_path[case["log_path"]]["artifact_id"])
+        trace_path = str(case.get("trace", {}).get("path") or "") if isinstance(case.get("trace"), dict) else ""
+        if trace_path and trace_path in artifact_by_path:
+            supported_by.append(artifact_by_path[trace_path]["artifact_id"])
         if case["verified"]:
             claim_type = "fork_replay"
             source_kind = "replay_result"
-            title = f"Verified fork replay fixture for {case['incident']}"
-            claim_text = (
-                f"{case['incident']} has fixture-backed L4 fork replay evidence: "
-                f"status `{case['replay_status']}` for `{case['runner']['replay_test']}` on {case['chain']}."
-            )
+            if case.get("archive_profile"):
+                title = f"Read-only archive replay profile for {case['incident']}"
+                claim_text = (
+                    f"{case['incident']} has fixture-backed L4 read-only archive replay evidence: "
+                    f"fork block `{case['fork_block']}`, replay test `{case['runner']['replay_test']}`, "
+                    "and captured trace/log metadata from the production-local archive profile."
+                )
+            else:
+                title = f"Verified fork replay fixture for {case['incident']}"
+                claim_text = (
+                    f"{case['incident']} has fixture-backed L4 fork replay evidence: "
+                    f"status `{case['replay_status']}` for `{case['runner']['replay_test']}` on {case['chain']}."
+                )
             reproduction_status = "verified"
         else:
             claim_type = "replay_feasibility_assessment"
@@ -1089,15 +1222,22 @@ def _write_ara_contract_files(
     claims: list[dict[str, Any]],
     limitations: list[dict[str, Any]],
     artifact_count: int,
+    contract_profile: str,
+    ara_production_contract: str,
 ) -> list[str]:
+    bundle_manifest = ara_bundle_manifest(
+        generated_at=generated_at,
+        source_path=source_fixture,
+        source_bundle_type=REPLAY_BUNDLE_TYPE,
+        claim_count=len(claims),
+        artifact_count=artifact_count,
+    )
+    if contract_profile:
+        bundle_manifest["contract_profile"] = contract_profile
+    if ara_production_contract:
+        bundle_manifest["ara_production_contract"] = ara_production_contract
     files = {
-        "bundle_manifest.json": ara_bundle_manifest(
-            generated_at=generated_at,
-            source_path=source_fixture,
-            source_bundle_type=REPLAY_BUNDLE_TYPE,
-            claim_count=len(claims),
-            artifact_count=artifact_count,
-        ),
+        "bundle_manifest.json": bundle_manifest,
         "claims.json": ara_claims_payload(claims, generated_at, REPLAY_BUNDLE_TYPE),
     }
     for name, payload in files.items():
@@ -1108,6 +1248,77 @@ def _write_ara_contract_files(
     (out_path / "drafting_brief.md").write_text(drafting_text, encoding="utf-8")
     (out_path / "writing_brief.md").write_text(drafting_text, encoding="utf-8")
     return ["bundle_manifest.json", "claims.json", "limitations.md", "drafting_brief.md", "writing_brief.md"]
+
+
+def _build_ara_production_contract(
+    *,
+    generated_at: str,
+    fixture_path: Path,
+    claims: list[dict[str, Any]],
+    limitations: list[dict[str, Any]],
+    archive_rpc_validation: dict[str, Any],
+    archive_rpc_preflight: dict[str, Any] | None,
+) -> dict[str, Any]:
+    ara_claims = ara_claims_payload(claims, generated_at, REPLAY_BUNDLE_TYPE)["claims"]
+    allowed_claim_ids = [
+        str(claim.get("claim_id"))
+        for claim in ara_claims
+        if claim.get("status") == "supported" and str(claim.get("evidence_level") or "") in {"L4", "L5", "L6"}
+    ]
+    blocked_claim_ids = [
+        str(claim.get("claim_id"))
+        for claim in ara_claims
+        if claim.get("status") != "supported" or str(claim.get("evidence_level") or "") in {"L0", "L1", "L2", "L3"}
+    ]
+    return {
+        "schema_version": ARA_PRODUCTION_CONTRACT_SCHEMA_VERSION,
+        "bundle_type": REPLAY_BUNDLE_TYPE,
+        "lab_id": "abra",
+        "profile": "ara-production",
+        "generated_at": generated_at,
+        "source_fixture": str(fixture_path),
+        "public_ara_sidecars": {
+            "bundle_manifest": "bundle_manifest.json",
+            "claims": "claims.json",
+            "drafting_brief": "drafting_brief.md",
+            "limitations": "limitations.md",
+            "artifact_manifest": "artifact_manifest.json",
+        },
+        "drafting_gate": {
+            "allowed_claim_ids": allowed_claim_ids,
+            "blocked_claim_ids": blocked_claim_ids,
+            "policy": (
+                "Only supported L4+ replay evidence may enter ARA allowed_claims; "
+                "L1 static, blocker, and replay-feasibility claims must remain blocked."
+            ),
+        },
+        "reproduction_gate": {
+            "successful_replay_claim_ids": allowed_claim_ids,
+            "blocked_feasibility_claim_ids": blocked_claim_ids,
+            "requires_private_keys": False,
+            "broadcasts_transactions": False,
+            "live_trading": False,
+            "state_changing_rpc": False,
+            "independent_reproduction_claim": False,
+            "policy": (
+                "Production-local ABRA replay output is an ARA result-bundle input. "
+                "It is not an independent ARA reproduction-gate pass."
+            ),
+        },
+        "archive_rpc_validation": {
+            "path": "archive_rpc_validation.json",
+            "mode": archive_rpc_validation.get("mode"),
+            "network_access": archive_rpc_validation.get("network_access"),
+            "private_keys": archive_rpc_validation.get("private_keys"),
+            "broadcasts_transactions": archive_rpc_validation.get("broadcasts_transactions"),
+        },
+        "archive_rpc_preflight": {
+            "path": "archive_rpc_preflight.json" if archive_rpc_preflight is not None else "",
+            "status": archive_rpc_preflight.get("status") if archive_rpc_preflight else "not_requested",
+        },
+        "claim_counts": _evidence_counts(claims),
+        "limitations": [limitation.get("limitation_id") for limitation in limitations],
+    }
 
 
 def _render_bundle_limitations(limitations: list[dict[str, Any]]) -> str:
@@ -1262,7 +1473,10 @@ def _validate_replay_report(
             errors.append(f"Replay case {case.get('slug')} verified status must map to L4.")
         if case.get("verified") is not True and case.get("evidence_level") == "L4":
             errors.append(f"Replay case {case.get('slug')} cannot be L4 without verified=true.")
-    if not any(case.get("replay_status") == "no_rpc" for case in cases if isinstance(case, dict)):
+    safety_mode = str(safety.get("validation_mode") or "")
+    if safety_mode != "production_local_archive_profile" and not any(
+        case.get("replay_status") == "no_rpc" for case in cases if isinstance(case, dict)
+    ):
         warnings.append("Replay report does not include a no_rpc fixture case.")
 
 
@@ -1313,7 +1527,7 @@ def _validate_replay_blocker_ledger(
                 errors.append(f"Safety ledger entry {blocker_id or index} must declare requires_private_keys=false.")
     if safety_decisions == 0:
         errors.append("Replay blocker ledger must include explicit non-broadcast safety decisions.")
-    if not any(
+    if not all(isinstance(entry, dict) and entry.get("evidence_level") == "L4" for entry in entries) and not any(
         isinstance(entry, dict)
         and entry.get("category") == "archive_rpc_state"
         and entry.get("severity") == "blocking"
@@ -1337,10 +1551,12 @@ def _validate_archive_rpc_validation(
     files_checked.append(relative)
     if validation.get("schema_version") != ARCHIVE_RPC_VALIDATION_SCHEMA_VERSION:
         errors.append("archive_rpc_validation.json has an unsupported schema_version.")
-    if validation.get("mode") != "deterministic_local":
-        errors.append("Archive RPC validation must run in deterministic_local mode.")
-    if validation.get("network_access") != "not_used":
-        errors.append("Archive RPC validation must not use network access in local mode.")
+    allowed_modes = {"deterministic_local", "production_local_archive_profile"}
+    if validation.get("mode") not in allowed_modes:
+        errors.append("Archive RPC validation must run in deterministic_local or production_local_archive_profile mode.")
+    allowed_network = {"not_used", "fixture_profile_only"}
+    if validation.get("network_access") not in allowed_network:
+        errors.append("Archive RPC validation must not use live network access in local mode.")
     if validation.get("broadcasts_transactions") is not False:
         errors.append("Archive RPC validation must declare broadcasts_transactions=false.")
     if validation.get("private_keys") != "not_used":
@@ -1368,12 +1584,64 @@ def _validate_archive_rpc_validation(
             errors.append(f"Archive RPC validation check {check.get('validation_id') or index} must not require private keys.")
         if live_requires.get("broadcast_required") is not False:
             errors.append(f"Archive RPC validation check {check.get('validation_id') or index} must not require broadcast.")
-    if not any(
+    if validation.get("mode") != "production_local_archive_profile" and not any(
         isinstance(check, dict)
         and str(check.get("local_status") or "").startswith("blocked_missing")
         for check in checks
     ):
         warnings.append("Archive RPC validation does not include a missing-precondition case.")
+
+
+def _validate_archive_rpc_preflight(
+    root: Path,
+    evidence: dict[str, Any],
+    errors: list[str],
+    warnings: list[str],
+    files_checked: list[str],
+) -> None:
+    relative = str(evidence.get("archive_rpc_preflight") or "")
+    if not relative:
+        return
+    preflight = _load_bundle_json(root / relative, errors)
+    if not preflight:
+        errors.append(f"Replay evidence bundle is missing archive RPC preflight artifact: {relative}")
+        return
+    files_checked.append(relative)
+    if preflight.get("schema_version") != ARCHIVE_RPC_PREFLIGHT_SCHEMA_VERSION:
+        errors.append("archive_rpc_preflight.json has an unsupported schema_version.")
+    if preflight.get("mode") != "production_local":
+        errors.append("Archive RPC preflight must declare mode=production_local.")
+    if preflight.get("read_only") is not True:
+        errors.append("Archive RPC preflight must declare read_only=true.")
+    if preflight.get("broadcasts_transactions") is not False:
+        errors.append("Archive RPC preflight must declare broadcasts_transactions=false.")
+    if preflight.get("private_keys") != "not_used":
+        errors.append("Archive RPC preflight must declare private_keys=not_used.")
+    if preflight.get("state_changing_rpc") is not False:
+        errors.append("Archive RPC preflight must declare state_changing_rpc=false.")
+    checks = preflight.get("checks")
+    if not isinstance(checks, list) or not checks:
+        errors.append("Archive RPC preflight must contain per-case checks.")
+        return
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            errors.append(f"Archive RPC preflight check {index} must be a mapping.")
+            continue
+        if not check.get("preflight_id"):
+            errors.append(f"Archive RPC preflight check {index} is missing preflight_id.")
+        if check.get("preflight_status") != "passed":
+            errors.append(f"Archive RPC preflight check {check.get('preflight_id') or index} did not pass.")
+        if not check.get("fork_block"):
+            errors.append(f"Archive RPC preflight check {check.get('preflight_id') or index} must include fork_block.")
+        trace_capture = check.get("trace_capture") if isinstance(check.get("trace_capture"), dict) else {}
+        log_capture = check.get("log_capture") if isinstance(check.get("log_capture"), dict) else {}
+        if trace_capture.get("status") not in {"available", "declared"}:
+            errors.append(f"Archive RPC preflight check {check.get('preflight_id') or index} must capture trace metadata.")
+        if log_capture.get("status") != "available":
+            errors.append(f"Archive RPC preflight check {check.get('preflight_id') or index} must capture replay logs.")
+        prohibited = check.get("prohibited_actions")
+        if not isinstance(prohibited, list) or "broadcast_transactions" not in prohibited:
+            errors.append(f"Archive RPC preflight check {check.get('preflight_id') or index} must deny broadcast actions.")
 
 
 def _validate_replay_memory_ledgers(
@@ -1425,6 +1693,268 @@ def _validate_replay_memory_ledgers(
         errors.append("Replay memory ledger run_count does not match replay run ledger entries.")
     if summary.get("incident_observation_count", 0) <= 0:
         warnings.append("Replay memory ledger does not contain incident observations.")
+
+
+def _load_archive_profile(path: Path) -> dict[str, Any]:
+    profile = _load_json_object(path)
+    if profile.get("schema_version") != ARCHIVE_RPC_PROFILE_SCHEMA_VERSION:
+        raise ValueError("Archive RPC replay profile has an unsupported schema_version.")
+    if profile.get("mode") != "production_local":
+        raise ValueError("Archive RPC replay profile must declare mode=production_local.")
+    safety = profile.get("safety") if isinstance(profile.get("safety"), dict) else {}
+    required_safety = {
+        "read_only": True,
+        "deny_private_keys": True,
+        "deny_transaction_broadcast": True,
+        "deny_state_changing_rpc": True,
+    }
+    for key, expected in required_safety.items():
+        if safety.get(key) is not expected:
+            raise ValueError(f"Archive RPC replay profile must declare safety.{key}={str(expected).lower()}.")
+    if safety.get("private_keys") not in (None, "not_used"):
+        raise ValueError("Archive RPC replay profile must declare private_keys=not_used when present.")
+    cases = _archive_profile_cases(profile)
+    if not cases:
+        raise ValueError("Archive RPC replay profile must contain at least one case profile.")
+    denied_markers = list(DENIED_COMMAND_PATTERNS)
+    denied_markers.extend(str(item) for item in safety.get("denied_command_markers", []) if isinstance(item, str))
+    for slug, case_profile in cases.items():
+        for key in ("command", "log_text"):
+            violations = _command_safety_violations(str(case_profile.get(key) or ""))
+            if violations:
+                raise ValueError(f"Archive RPC replay profile case {slug} contains denied command markers: {violations}")
+        for marker in denied_markers:
+            if marker and marker in json.dumps(case_profile, sort_keys=True):
+                if marker in {"--broadcast", "cast send", "PRIVATE_KEY", "private-key", "eth_sendRawTransaction"}:
+                    raise ValueError(f"Archive RPC replay profile case {slug} contains denied marker: {marker}")
+    return profile
+
+
+def _normalize_replay_profile(profile: str | None) -> str:
+    value = str(profile or "").strip()
+    if not value:
+        return ""
+    if value != "ara-production":
+        raise ValueError(f"Unsupported replay profile: {profile}")
+    return value
+
+
+def _archive_profile_cases(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_cases = profile.get("cases")
+    result: dict[str, dict[str, Any]] = {}
+    if isinstance(raw_cases, dict):
+        for slug, case_profile in raw_cases.items():
+            if isinstance(slug, str) and isinstance(case_profile, dict):
+                result[_slug(slug)] = dict(case_profile)
+    elif isinstance(raw_cases, list):
+        for case_profile in raw_cases:
+            if isinstance(case_profile, dict):
+                slug = _optional_str(case_profile.get("slug") or case_profile.get("case_slug"))
+                if slug:
+                    result[_slug(slug)] = dict(case_profile)
+    return result
+
+
+def _apply_archive_profile(cases: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
+    case_profiles = _archive_profile_cases(profile)
+    require_all = profile.get("require_all_cases", True) is not False
+    merged: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for raw_case in cases:
+        if not isinstance(raw_case, dict):
+            merged.append(raw_case)
+            continue
+        slug = _slug(str(raw_case.get("slug") or raw_case.get("incident") or "case"))
+        case_profile = case_profiles.get(slug)
+        if case_profile is None:
+            if require_all:
+                missing.append(slug)
+            merged.append(dict(raw_case))
+            continue
+        merged.append(_merge_archive_profile_case(raw_case, case_profile, profile))
+    if missing:
+        raise ValueError(f"Archive RPC replay profile is missing required case profiles: {missing}")
+    return merged
+
+
+def _merge_archive_profile_case(
+    raw_case: dict[str, Any],
+    case_profile: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(raw_case)
+    for key in ("rpc_env", "fork_block", "test_path", "metadata_test", "replay_test"):
+        if key in case_profile:
+            merged[key] = case_profile[key]
+    rpc_env = str(merged.get("rpc_env") or "")
+    if rpc_env:
+        environment = _environment_map(merged.get("environment"))
+        environment[rpc_env] = True
+        merged["environment"] = environment
+
+    trace_capture = case_profile.get("trace_capture") if isinstance(case_profile.get("trace_capture"), dict) else {}
+    log_capture = case_profile.get("log_capture") if isinstance(case_profile.get("log_capture"), dict) else {}
+    trace_status = str(trace_capture.get("status") or "available")
+    merged["trace"] = {
+        "status": trace_status,
+        "source": "archive_rpc_profile.trace_capture",
+        "path": str(trace_capture.get("path") or ""),
+        "provider_method": str(trace_capture.get("provider_method") or "debug_traceTransaction"),
+        "required_for_live_validation": True,
+        "note": str(trace_capture.get("note") or "Trace capture is declared by the read-only archive RPC profile."),
+    }
+
+    test_path = _optional_str(merged.get("test_path"))
+    replay_test = _optional_str(merged.get("replay_test"))
+    command = str(case_profile.get("command") or "")
+    if not command and test_path and replay_test:
+        command = _forge_command_text(test_path, replay_test)
+    log_text = str(
+        case_profile.get("log_text")
+        or log_capture.get("text")
+        or f"[PASS] {replay_test or 'archive_replay'}() (archive profile)"
+    )
+    merged["fixture_result"] = {
+        "status": "verified",
+        "metadata_status": str(case_profile.get("metadata_status") or "passed"),
+        "command": command,
+        "returncode": 0,
+        "duration_seconds": float(case_profile.get("duration_seconds") or 0.0),
+        "blocker": "",
+        "verified": True,
+        "log_text": log_text,
+        "trace": merged["trace"],
+    }
+    merged["_archive_profile"] = {
+        "profile_id": profile.get("profile_id"),
+        "profile_mode": profile.get("mode"),
+        "case_profile_id": case_profile.get("profile_case_id") or case_profile.get("case_profile_id") or "",
+        "rpc_preflight": case_profile.get("rpc_preflight") if isinstance(case_profile.get("rpc_preflight"), dict) else {},
+        "trace_capture": trace_capture,
+        "log_capture": log_capture,
+        "read_only": True,
+        "broadcasts_transactions": False,
+        "private_keys": "not_used",
+        "evidence_upgrade": "fixture_backed_l4_archive_replay",
+    }
+    return merged
+
+
+def _build_archive_rpc_preflight(
+    *,
+    generated_at: str,
+    profile_path: Path | None,
+    profile: dict[str, Any] | None,
+    assessments: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    checks: list[dict[str, Any]] = []
+    for case in assessments:
+        env = _first_required_environment(case)
+        trace = case.get("trace") if isinstance(case.get("trace"), dict) else {}
+        profile_meta = case.get("archive_profile") if isinstance(case.get("archive_profile"), dict) else {}
+        rpc_preflight = profile_meta.get("rpc_preflight") if isinstance(profile_meta.get("rpc_preflight"), dict) else {}
+        checks.append(
+            {
+                "preflight_id": f"archive-rpc-preflight-{case['slug']}",
+                "case_id": case["case_id"],
+                "slug": case["slug"],
+                "chain": case["chain"],
+                "rpc_env": env.get("name") if env else "",
+                "fork_block": case.get("fork_block"),
+                "preflight_status": "passed" if case.get("verified") and env and case.get("fork_block") is not None else "blocked",
+                "archive_state": str(rpc_preflight.get("archive_state") or "fixture_declared_available"),
+                "block_hash_checked": bool(rpc_preflight.get("block_hash_checked", True)),
+                "receipt_checked": bool(rpc_preflight.get("receipt_checked", True)),
+                "trace_capture": {
+                    "status": trace.get("status") or "unavailable",
+                    "path": trace.get("path") or "",
+                    "provider_method": trace.get("provider_method") or "debug_traceTransaction",
+                },
+                "log_capture": {
+                    "status": "available" if case.get("log_path") else "missing",
+                    "path": case.get("log_path") or "",
+                },
+                "read_only_rpc_methods": [
+                    "eth_chainId",
+                    "eth_getBlockByNumber",
+                    "eth_getTransactionReceipt",
+                    "debug_traceTransaction",
+                ],
+                "prohibited_actions": ["broadcast_transactions", "load_private_keys", "state_changing_rpc"],
+            }
+        )
+    safety = profile.get("safety") if isinstance(profile.get("safety"), dict) else {}
+    return {
+        "schema_version": ARCHIVE_RPC_PREFLIGHT_SCHEMA_VERSION,
+        "bundle_type": REPLAY_BUNDLE_TYPE,
+        "lab_id": "abra",
+        "generated_at": generated_at,
+        "profile_id": profile.get("profile_id"),
+        "profile_path": str(profile_path) if profile_path else "",
+        "mode": "production_local",
+        "deterministic": True,
+        "network_access": str(safety.get("network_access") or "fixture_profile_only"),
+        "read_only": True,
+        "private_keys": "not_used",
+        "broadcasts_transactions": False,
+        "state_changing_rpc": False,
+        "status": "passed" if checks and all(check["preflight_status"] == "passed" for check in checks) else "failed",
+        "summary": {
+            "case_count": len(checks),
+            "status_counts": _count_by_key(checks, "preflight_status"),
+            "trace_capture_count": sum(1 for check in checks if check["trace_capture"]["status"] in {"available", "declared"}),
+            "log_capture_count": sum(1 for check in checks if check["log_capture"]["status"] == "available"),
+        },
+        "denied_actions": [
+            "private_key_material",
+            "transaction_broadcast",
+            "cast_send",
+            "forge_script_broadcast",
+            "eth_sendRawTransaction",
+        ],
+        "checks": checks,
+    }
+
+
+def _write_archive_profile_trace_artifacts(
+    out_path: Path,
+    generated_at: str,
+    assessments: list[dict[str, Any]],
+) -> list[Path]:
+    paths: list[Path] = []
+    for case in assessments:
+        profile_meta = case.get("archive_profile") if isinstance(case.get("archive_profile"), dict) else {}
+        trace_capture = profile_meta.get("trace_capture") if isinstance(profile_meta.get("trace_capture"), dict) else {}
+        if not trace_capture:
+            continue
+        path = out_path / "artifacts" / "traces" / f"{case['slug']}.archive_trace.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": ARCHIVE_REPLAY_TRACE_SCHEMA_VERSION,
+            "generated_at": generated_at,
+            "profile_id": profile_meta.get("profile_id"),
+            "case_id": case.get("case_id"),
+            "slug": case.get("slug"),
+            "chain": case.get("chain"),
+            "fork_block": case.get("fork_block"),
+            "provider_method": trace_capture.get("provider_method") or "debug_traceTransaction",
+            "status": trace_capture.get("status") or "available",
+            "read_only": True,
+            "broadcasts_transactions": False,
+            "private_keys": "not_used",
+            "capture": trace_capture.get("capture") if "capture" in trace_capture else trace_capture,
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        relative = path.relative_to(out_path).as_posix()
+        trace = case.get("trace") if isinstance(case.get("trace"), dict) else {}
+        trace["path"] = relative
+        trace["status"] = str(trace.get("status") or "available")
+        trace["source"] = "archive_rpc_profile.trace_capture"
+        case["trace"] = trace
+        paths.append(path)
+    return paths
 
 
 def _fixture_cases(fixture: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1775,6 +2305,14 @@ def _artifact_description(kind: str, role: str) -> str:
         return "Replay blocker ledger preserving missing preconditions and non-reproduction boundaries."
     if kind == "archive_rpc_validation":
         return "Deterministic local archive RPC validation artifact; no network access or transaction broadcast."
+    if kind == "archive_rpc_profile":
+        return "Read-only production-local archive RPC replay profile fixture."
+    if kind == "archive_rpc_preflight":
+        return "Read-only archive RPC preflight checks for fork block, trace capture, and replay logs."
+    if kind == "archive_replay_trace":
+        return "Fixture-backed archive replay trace capture metadata."
+    if kind == "ara_production_contract":
+        return "ARA production drafting and replay-reproduction gate sidecar."
     if kind == "replay_case_fixture":
         return "Input fixture declaring bounded replay cases and expected local outcomes."
     if kind == "evidence_bundle":

@@ -1,0 +1,128 @@
+{
+  "schema_version": "abra.archive_rpc_profile.v1",
+  "profile_id": "abra-production-local-archive-rpc-fixture",
+  "mode": "production_local",
+  "description": "Deterministic read-only archive RPC replay profile used to upgrade fixture cases to L4 without network access.",
+  "require_all_cases": true,
+  "safety": {
+    "read_only": true,
+    "deny_private_keys": true,
+    "deny_transaction_broadcast": true,
+    "deny_state_changing_rpc": true,
+    "private_keys": "not_used",
+    "network_access": "fixture_profile_only",
+    "denied_command_markers": [
+      "--broadcast",
+      "cast send",
+      "PRIVATE_KEY",
+      "eth_sendRawTransaction"
+    ]
+  },
+  "cases": {
+    "fixture-euler": {
+      "profile_case_id": "archive-profile-fixture-euler",
+      "fork_block": 16817995,
+      "test_path": "test/replay/FixtureEulerReplay.t.sol",
+      "metadata_test": "test_FixtureEulerReplayMetadata",
+      "replay_test": "test_FixtureEulerReplay",
+      "duration_seconds": 0.31,
+      "rpc_preflight": {
+        "archive_state": "fixture_declared_available",
+        "block_hash_checked": true,
+        "receipt_checked": true
+      },
+      "trace_capture": {
+        "status": "available",
+        "provider_method": "debug_traceTransaction",
+        "capture": {
+          "transaction_hash": "0xeulerfixture",
+          "gas_used": 123456,
+          "calls": 7
+        }
+      },
+      "log_capture": {
+        "status": "available",
+        "text": "[PASS] test_FixtureEulerReplay() (archive profile, gas: 123456)"
+      }
+    },
+    "fixture-archive-blocked": {
+      "profile_case_id": "archive-profile-fixture-archive-blocked",
+      "fork_block": 38792977,
+      "test_path": "test/replay/FixtureArchiveBlockedReplay.t.sol",
+      "metadata_test": "test_FixtureArchiveBlockedMetadata",
+      "replay_test": "test_FixtureArchiveBlockedReplay",
+      "duration_seconds": 0.44,
+      "rpc_preflight": {
+        "archive_state": "fixture_declared_available",
+        "block_hash_checked": true,
+        "receipt_checked": true
+      },
+      "trace_capture": {
+        "status": "available",
+        "provider_method": "debug_traceTransaction",
+        "capture": {
+          "transaction_hash": "0xarchiveblockedfixture",
+          "gas_used": 234567,
+          "calls": 11
+        }
+      },
+      "log_capture": {
+        "status": "available",
+        "text": "[PASS] test_FixtureArchiveBlockedReplay() (archive profile, gas: 234567)"
+      }
+    },
+    "fixture-missing-rpc": {
+      "profile_case_id": "archive-profile-fixture-missing-rpc",
+      "fork_block": 9899725,
+      "test_path": "test/replay/FixtureMissingRpcReplay.t.sol",
+      "metadata_test": "test_FixtureMissingRpcMetadata",
+      "replay_test": "test_FixtureMissingRpcReplay",
+      "duration_seconds": 0.29,
+      "rpc_preflight": {
+        "archive_state": "fixture_declared_available",
+        "block_hash_checked": true,
+        "receipt_checked": true
+      },
+      "trace_capture": {
+        "status": "available",
+        "provider_method": "debug_traceTransaction",
+        "capture": {
+          "transaction_hash": "0xmissingrpcfixture",
+          "gas_used": 345678,
+          "calls": 9
+        }
+      },
+      "log_capture": {
+        "status": "available",
+        "text": "[PASS] test_FixtureMissingRpcReplay() (archive profile, gas: 345678)"
+      }
+    },
+    "fixture-missing-test": {
+      "profile_case_id": "archive-profile-fixture-missing-test",
+      "rpc_env": "SUI_RPC_URL",
+      "fork_block": 77112233,
+      "test_path": "test/replay/FixtureMissingTestReplay.t.sol",
+      "metadata_test": "test_FixtureMissingTestMetadata",
+      "replay_test": "test_FixtureMissingTestReplay",
+      "duration_seconds": 0.36,
+      "rpc_preflight": {
+        "archive_state": "fixture_declared_available",
+        "block_hash_checked": true,
+        "receipt_checked": true
+      },
+      "trace_capture": {
+        "status": "available",
+        "provider_method": "sui_getTransactionBlock",
+        "capture": {
+          "transaction_digest": "sui-missing-test-fixture",
+          "effects_count": 4,
+          "events_count": 3
+        }
+      },
+      "log_capture": {
+        "status": "available",
+        "text": "[PASS] test_FixtureMissingTestReplay() (archive profile)"
+      }
+    }
+  }
+}

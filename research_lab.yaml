@@ -37,6 +37,8 @@ commands:
     - cast send
     - --broadcast
     - PRIVATE_KEY
+    - private-key
+    - eth_sendRawTransaction
 
 dispatch:
   commands:
@@ -84,6 +86,38 @@ dispatch:
         - --json
       side_effect_free: false
       description: Run the bounded local ABRA research agent loop over a replay fixture.
+    archive-replay-profile:
+      argv:
+        - python3
+        - -m
+        - abra
+        - replay
+        - assess
+        - --case-fixture
+        - tests/fixtures/replay_case.json
+        - --archive-profile
+        - tests/fixtures/archive_rpc_profile.json
+        - --out
+        - /tmp/abra_archive_replay_bundle
+        - --json
+      side_effect_free: false
+      description: Build a deterministic read-only archive replay evidence bundle with L4 fixture-backed claims.
+    ara-production-replay-contract:
+      argv:
+        - python3
+        - -m
+        - abra
+        - replay
+        - assess
+        - --case-fixture
+        - tests/fixtures/replay_case.json
+        - --profile
+        - ara-production
+        - --out
+        - /tmp/abra_ara_production_bundle
+        - --json
+      side_effect_free: false
+      description: Build an ARA production contract replay bundle that keeps L1 feasibility blockers out of successful replay drafting.
 
 environment:
   required: []

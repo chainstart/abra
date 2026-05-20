@@ -11,6 +11,7 @@ from abra import __version__
 from abra.agent import run_research_agent
 from abra.bundle import build_result_bundle, validate_result_bundle
 from abra.manifest import load_manifest
+from abra.memory import build_memory_index, query_memory_index
 from abra.replay_agent import assess_replay_fixture, validate_evidence_bundle
 from abra.smoke import build_smoke_report
 from abra.tools import list_tools
@@ -42,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_evidence(args)
         if args.command == "agent":
             return _handle_agent(args)
+        if args.command == "memory":
+            return _handle_memory(args)
     except ValueError as exc:
         payload = {"status": "failed", "error": str(exc)}
         _emit(payload, getattr(args, "json", False))
@@ -97,6 +100,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     replay_assess = replay_sub.add_parser("assess", help="Build a replay feasibility evidence bundle.")
     replay_assess.add_argument("--case-fixture", required=True, help="Local replay case fixture JSON.")
+    replay_assess.add_argument(
+        "--archive-profile",
+        help="Optional production-local read-only archive RPC replay profile JSON.",
+    )
+    replay_assess.add_argument(
+        "--profile",
+        choices=["ara-production"],
+        help="Named replay bundle contract profile. `ara-production` emits public ARA drafting gate sidecars.",
+    )
     replay_assess.add_argument("--out", required=True, help="Output replay evidence bundle directory.")
     replay_assess.add_argument("--json", action="store_true", help="Print JSON output.")
 
@@ -117,6 +129,21 @@ def _build_parser() -> argparse.ArgumentParser:
     agent_run.add_argument("--rounds", type=int, default=3, help="Maximum local rounds to run, capped at 5.")
     agent_run.add_argument("--min-level", default="L1", help="Minimum evidence level required for validation.")
     agent_run.add_argument("--json", action="store_true", help="Print JSON output.")
+
+    memory = subparsers.add_parser("memory", help="Build and query ABRA repo-level memory indexes.")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+
+    memory_build = memory_sub.add_parser("build", help="Build the ABRA incident/finding/replay memory index.")
+    memory_build.add_argument("--reports", required=True, help="Reports directory to index.")
+    memory_build.add_argument("--data", required=True, help="Data directory to index.")
+    memory_build.add_argument("--out", required=True, help="Output memory index directory.")
+    memory_build.add_argument("--json", action="store_true", help="Print JSON output.")
+
+    memory_query = memory_sub.add_parser("query", help="Query a built ABRA memory index by topic.")
+    memory_query.add_argument("--index", required=True, help="Memory index directory.")
+    memory_query.add_argument("--topic", required=True, help="Topic text, e.g. replay.")
+    memory_query.add_argument("--limit", type=int, default=25, help="Maximum results to return.")
+    memory_query.add_argument("--json", action="store_true", help="Print JSON output.")
 
     return parser
 
@@ -175,7 +202,12 @@ def _handle_bundle(args: argparse.Namespace) -> int:
 
 def _handle_replay(args: argparse.Namespace) -> int:
     if args.replay_command == "assess":
-        payload = assess_replay_fixture(args.case_fixture, args.out)
+        payload = assess_replay_fixture(
+            args.case_fixture,
+            args.out,
+            archive_profile=args.archive_profile,
+            profile=args.profile,
+        )
         _emit(payload, args.json)
         return 0 if payload["status"] == "passed" else 1
 
@@ -205,6 +237,20 @@ def _handle_agent(args: argparse.Namespace) -> int:
     raise ValueError(f"Unsupported agent command: {args.agent_command}")
 
 
+def _handle_memory(args: argparse.Namespace) -> int:
+    if args.memory_command == "build":
+        payload = build_memory_index(args.reports, args.data, args.out)
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
+    if args.memory_command == "query":
+        payload = query_memory_index(args.index, args.topic, args.limit)
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
+    raise ValueError(f"Unsupported memory command: {args.memory_command}")
+
+
 def _emit(payload: dict[str, Any], as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -231,6 +277,10 @@ def _emit(payload: dict[str, Any], as_json: bool) -> None:
         print(f"rounds: {payload['round_count']}")
     if "evidence_levels" in payload:
         print(f"evidence: {payload['evidence_levels']}")
+    if "index_path" in payload:
+        print(f"index: {Path(str(payload['index_path']))}")
+    if "matched_count" in payload:
+        print(f"matches: {payload['matched_count']}")
     if payload.get("errors"):
         for error in payload["errors"]:
             print(f"error: {error}")

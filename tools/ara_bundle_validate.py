@@ -131,12 +131,6 @@ def _looks_like_replay_or_static_boundary(claim: dict[str, Any]) -> bool:
         str(claim.get(key) or "").lower()
         for key in ("claim", "claim_id", "status", "evidence_level")
     )
-
-
-def _evidence_rank(level: str) -> int:
-    if level.startswith("L") and level[1:].isdigit():
-        return int(level[1:])
-    return -1
     return any(
         marker in text
         for marker in (
@@ -149,6 +143,12 @@ def _evidence_rank(level: str) -> int:
             "fork replayed",
         )
     )
+
+
+def _evidence_rank(level: str) -> int:
+    if level.startswith("L") and level[1:].isdigit():
+        return int(level[1:])
+    return -1
 
 
 def _payload(

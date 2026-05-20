@@ -321,6 +321,140 @@ milestones:
       command: python3 -c "import sys; sys.path.insert(0, '/home/biostar/work/projects/engineering-harness/src'); from engineering_harness.cli import main; raise SystemExit(main(['spec-sync', 'audit', '--project-root', '.', '--json']))" >/tmp/abra_spec_sync_audit.json
       required: true
       timeout_seconds: 120
+- id: abra-remaining-spec-harness-plan
+  title: ABRA Remaining Spec Harness Plan
+  status: active
+  objective: >-
+    Drain the remaining ABRA partial requirements through explicit harness task
+    packages: read-only archive replay, repo-level memory, and production ARA
+    contract alignment.
+  tasks:
+  - id: ABRA-ARCHIVE-REPLAY-001
+    title: Add read-only archive RPC replay profile and evidence upgrade path
+    status: completed
+    max_attempts: 2
+    max_task_iterations: 3
+    manual_approval_required: false
+    file_scope:
+    - abra/**
+    - tests/**
+    - docs/**
+    - tools/**
+    - research_lab.yaml
+    - .engineering/spec_tasks.yaml
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex implements ABRA read-only archive replay profile
+      executor: codex
+      timeout_seconds: 7200
+      no_progress_timeout_seconds: 1200
+      requested_capabilities:
+      - agent
+      prompt: Implement ABRA-ARCHIVE-REPLAY-001. Add a production-local read-only archive RPC replay profile with fork block, trace/log capture, archive RPC preflight, fixture-backed deterministic tests, and explicit denial of private-key or transaction broadcast actions. Preserve current bounded replay assessment behavior and update docs/spec tracking.
+    acceptance:
+    - name: ABRA archive replay profile emits evidence bundle
+      command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --archive-profile tests/fixtures/archive_rpc_profile.json --out /tmp/abra_archive_replay_bundle --json >/tmp/abra_archive_replay.json
+      required: true
+      timeout_seconds: 420
+    - name: ABRA archive replay evidence validates at L4
+      command: python3 -m abra evidence validate /tmp/abra_archive_replay_bundle --min-level L4 --json >/tmp/abra_archive_evidence.json
+      required: true
+      timeout_seconds: 180
+    - name: ABRA archive replay tests pass
+      command: python3 -m pytest -q tests/test_abra_archive_replay.py tests/test_abra_replay_agent.py tests/test_abra_result_bundle.py
+      required: true
+      timeout_seconds: 900
+    - name: ABRA dynamic spec audit passes
+      command: python3 -c "import sys; sys.path.insert(0, '/home/biostar/work/projects/engineering-harness/src'); from engineering_harness.cli import main; raise SystemExit(main(['spec-sync', 'audit', '--project-root', '.', '--json']))" >/tmp/abra_spec_sync_audit.json
+      required: true
+      timeout_seconds: 120
+  - id: ABRA-INCIDENT-MEMORY-001
+    title: Build repo-level incident, finding, replay, and agent memory index
+    status: completed
+    max_attempts: 2
+    max_task_iterations: 3
+    manual_approval_required: false
+    file_scope:
+    - abra/**
+    - tests/**
+    - docs/**
+    - data/**
+    - reports/**
+    - .engineering/spec_tasks.yaml
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex implements ABRA incident memory
+      executor: codex
+      timeout_seconds: 5400
+      no_progress_timeout_seconds: 900
+      requested_capabilities:
+      - agent
+      prompt: Implement ABRA-INCIDENT-MEMORY-001. Promote ABRA replay and agent ledgers into a durable repo-level memory index over historical incidents, findings, replay blockers, evidence levels, decisions, and reusable observations. Add CLI build/query commands, deterministic fixtures, tests, docs, and spec tracking.
+    acceptance:
+    - name: ABRA incident memory builds
+      command: python3 -m abra memory build --reports reports --data data --out /tmp/abra_incident_memory --json >/tmp/abra_incident_memory.json
+      required: true
+      timeout_seconds: 300
+    - name: ABRA incident memory query works
+      command: python3 -m abra memory query --index /tmp/abra_incident_memory --topic replay --json >/tmp/abra_incident_memory_query.json
+      required: true
+      timeout_seconds: 180
+    - name: ABRA memory tests pass
+      command: python3 -m pytest -q tests/test_abra_memory.py tests/test_abra_agent_loop.py tests/test_abra_replay_memory.py
+      required: true
+      timeout_seconds: 900
+    - name: ABRA dynamic spec audit passes
+      command: python3 -c "import sys; sys.path.insert(0, '/home/biostar/work/projects/engineering-harness/src'); from engineering_harness.cli import main; raise SystemExit(main(['spec-sync', 'audit', '--project-root', '.', '--json']))" >/tmp/abra_spec_sync_audit.json
+      required: true
+      timeout_seconds: 120
+    notes: >-
+      Implemented a deterministic repo-level memory index that promotes
+      historical incidents, findings, replay blockers, evidence levels,
+      decisions, and reusable observations from reports, data, and discovered
+      local ledgers.
+  - id: ABRA-ARA-PRODUCTION-CONTRACT-001
+    title: Align production replay bundles with public ARA validation and drafting gates
+    status: completed
+    max_attempts: 2
+    max_task_iterations: 3
+    manual_approval_required: false
+    file_scope:
+    - abra/**
+    - tests/**
+    - docs/**
+    - tools/**
+    - research_lab.yaml
+    - .engineering/spec_tasks.yaml
+    - .engineering/roadmap.yaml
+    implementation:
+    - name: codex aligns ABRA production replay bundles with ARA
+      executor: codex
+      timeout_seconds: 5400
+      no_progress_timeout_seconds: 900
+      requested_capabilities:
+      - agent
+      prompt: Implement ABRA-ARA-PRODUCTION-CONTRACT-001. Add production replay bundle sidecars and validation tests proving public ARA can consume ABRA production-local replay outputs without overstating static findings or replay-feasibility claims as successful exploit replay. Do not edit ARA directly; use tools/ara_bundle_validate.py for cross-repo smoke.
+    acceptance:
+    - name: ABRA production replay bundle emits ARA sidecars
+      command: python3 -m abra replay assess --case-fixture tests/fixtures/replay_case.json --profile ara-production --out /tmp/abra_ara_production_bundle --json >/tmp/abra_ara_production.json
+      required: true
+      timeout_seconds: 420
+    - name: Public ARA validates ABRA production replay bundle
+      command: python3 tools/ara_bundle_validate.py /tmp/abra_ara_production_bundle --json >/tmp/abra_ara_production_validate.json
+      required: true
+      timeout_seconds: 180
+    - name: ABRA production ARA contract tests pass
+      command: python3 -m pytest -q tests/test_abra_result_bundle.py tests/test_abra_ara_production_contract.py tests/test_abra_cli.py
+      required: true
+      timeout_seconds: 900
+    - name: ABRA dynamic spec audit passes
+      command: python3 -c "import sys; sys.path.insert(0, '/home/biostar/work/projects/engineering-harness/src'); from engineering_harness.cli import main; raise SystemExit(main(['spec-sync', 'audit', '--project-root', '.', '--json']))" >/tmp/abra_spec_sync_audit.json
+      required: true
+      timeout_seconds: 120
+    notes: >-
+      Added the ara-production replay profile, ARA production contract sidecar,
+      and focused public ARA validation tests while keeping L1 replay feasibility
+      blockers out of successful exploit replay drafting.
 profile: python-agent
 project: abra
 report_dir: .engineering/reports/tasks
