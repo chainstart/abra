@@ -12,6 +12,7 @@ from abra.agent import run_research_agent
 from abra.bundle import build_result_bundle, validate_result_bundle
 from abra.manifest import load_manifest
 from abra.replay_agent import assess_replay_fixture, validate_evidence_bundle
+from abra.replay_cohort import build_replay_cohort
 from abra.smoke import build_smoke_report
 from abra.tools import list_tools
 
@@ -92,8 +93,54 @@ def _build_parser() -> argparse.ArgumentParser:
     bundle_validate.add_argument("bundle_path", help="Path to an abra_result_bundle directory.")
     bundle_validate.add_argument("--json", action="store_true", help="Print JSON output.")
 
-    replay = subparsers.add_parser("replay", help="Assess bounded ABRA replay feasibility.")
+    replay = subparsers.add_parser("replay", help="Build replay cohorts and assess replay feasibility.")
     replay_sub = replay.add_subparsers(dest="replay_command", required=True)
+
+    replay_cohort = replay_sub.add_parser("cohort", help="Build a validated public incident replay cohort.")
+    replay_cohort.add_argument(
+        "--incidents-csv",
+        default="data/processed/incidents_normalized_latest.csv",
+        help="Normalized incident CSV produced by the ABRA phase-1 pipeline.",
+    )
+    replay_cohort.add_argument(
+        "--selected-incidents-csv",
+        default=None,
+        help="Optional ABRA selected incident CSV used as a ranking boost.",
+    )
+    replay_cohort.add_argument(
+        "--replay-results-csv",
+        default="data/processed/replay_results.csv",
+        help="Optional replay result CSV used to attach fork blocks and replay tests.",
+    )
+    replay_cohort.add_argument(
+        "--event-cards-dir",
+        default="reports/events",
+        help="Directory containing ABRA incident event cards.",
+    )
+    replay_cohort.add_argument("--out", required=True, help="Output cohort directory.")
+    replay_cohort.add_argument("--min-cases", type=int, default=10, help="Minimum eligible cases required.")
+    replay_cohort.add_argument("--max-cases", type=int, default=20, help="Maximum cases to retain.")
+    replay_cohort.add_argument("--evm-only", action="store_true", default=True, help="Restrict the cohort to EVM chains.")
+    replay_cohort.add_argument("--include-non-evm", dest="evm_only", action="store_false", help="Allow non-EVM cases.")
+    replay_cohort.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Refresh ABRA SlowMist/DefiLlama snapshots before building the cohort.",
+    )
+    replay_cohort.add_argument("--refresh-start-page", type=int, default=1, help="SlowMist refresh start page.")
+    replay_cohort.add_argument("--refresh-end-page", type=int, default=8, help="SlowMist refresh end page.")
+    replay_cohort.add_argument("--refresh-top-protocols", type=int, default=400, help="DefiLlama protocol refresh cap.")
+    replay_cohort.add_argument(
+        "--allow-missing-seed-transaction-hash",
+        action="store_true",
+        help="Keep cases without seed transaction hashes for diagnostic cohorts.",
+    )
+    replay_cohort.add_argument(
+        "--allow-missing-replay-block",
+        action="store_true",
+        help="Keep cases without fork/replay blocks for diagnostic cohorts.",
+    )
+    replay_cohort.add_argument("--json", action="store_true", help="Print JSON output.")
 
     replay_assess = replay_sub.add_parser("assess", help="Build a replay feasibility evidence bundle.")
     replay_assess.add_argument("--case-fixture", required=True, help="Local replay case fixture JSON.")
@@ -174,6 +221,26 @@ def _handle_bundle(args: argparse.Namespace) -> int:
 
 
 def _handle_replay(args: argparse.Namespace) -> int:
+    if args.replay_command == "cohort":
+        payload = build_replay_cohort(
+            incidents_csv=args.incidents_csv,
+            selected_incidents_csv=args.selected_incidents_csv,
+            replay_results_csv=args.replay_results_csv,
+            event_cards_dir=args.event_cards_dir,
+            out=args.out,
+            min_cases=args.min_cases,
+            max_cases=args.max_cases,
+            evm_only=args.evm_only,
+            refresh=args.refresh,
+            refresh_start_page=args.refresh_start_page,
+            refresh_end_page=args.refresh_end_page,
+            refresh_top_protocols=args.refresh_top_protocols,
+            require_seed_transaction_hash=not args.allow_missing_seed_transaction_hash,
+            require_replay_block=not args.allow_missing_replay_block,
+        )
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
     if args.replay_command == "assess":
         payload = assess_replay_fixture(args.case_fixture, args.out)
         _emit(payload, args.json)

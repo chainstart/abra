@@ -57,6 +57,14 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "category": "data_pipeline",
         "side_effect_free": False,
     },
+    {
+        "name": "replay_cohort_builder",
+        "description": "Build validated incident cohorts for replay evidence production.",
+        "path": "abra/replay_cohort.py",
+        "command": ["python3", "-m", "abra", "replay", "cohort"],
+        "category": "data_pipeline",
+        "side_effect_free": False,
+    },
 )
 
 
