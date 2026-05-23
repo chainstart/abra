@@ -170,5 +170,75 @@ def test_replay_assess_and_evidence_validate_cli_round_trip(tmp_path):
     assert validate_payload["minimum_level"] == "L1"
 
 
+def test_replay_assess_cohort_cli_consumes_cohort_cases(tmp_path):
+    cohort_dir = tmp_path / "cohort"
+    cases_dir = cohort_dir / "cases"
+    cases_dir.mkdir(parents=True)
+    case_payload = {
+        "schema_version": "abra.replay_cohort.case.v1",
+        "case_id": "incident-euler",
+        "slug": "fixture-euler",
+        "incident": "Fixture Euler",
+        "chain": "ethereum",
+        "attack_family": "flash_loan",
+        "loss_usd": 1000000,
+        "fork_block": 16817995,
+        "seed_transaction_hash": "0x" + "1" * 64,
+        "test_path": "test/replay/FixtureEulerReplay.t.sol",
+        "replay_test": "test_FixtureEulerReplay",
+        "metadata_test": "test_FixtureEulerReplayMetadata",
+        "environment": {"ETH_RPC_URL": True},
+        "fixture_result": {
+            "status": "verified",
+            "metadata_status": "passed",
+            "returncode": 0,
+            "verified": True,
+            "log_text": "[PASS] test_FixtureEulerReplay()",
+        },
+    }
+    (cases_dir / "fixture-euler.json").write_text(json.dumps(case_payload), encoding="utf-8")
+    (cohort_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "abra.replay_cohort.manifest.v1",
+                "cohort_id": "cohort-test",
+                "case_count": 1,
+                "cases": [{"slug": "fixture-euler", "case_file": "cases/fixture-euler.json"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "cohort_evidence"
+
+    assess = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "abra",
+            "replay",
+            "assess-cohort",
+            "--cohort",
+            str(cohort_dir),
+            "--out",
+            str(out_dir),
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert assess.returncode == 0, assess.stderr
+    payload = json.loads(assess.stdout)
+    assert payload["schema_version"] == "abra.replay_cohort_assessment.v1"
+    assert payload["status"] == "passed"
+    assert payload["case_count"] == 1
+    assert payload["assessed_count"] == 1
+    assert payload["verified_count"] == 1
+    assert (out_dir / "cohort_evidence_manifest.json").exists()
+    assert (out_dir / "cases" / "fixture-euler" / "evidence_bundle.json").exists()
+    assert (out_dir / "cases" / "fixture-euler" / "replay_feasibility_report.json").exists()
+
+
 def test_replay_runner_failure_classifier_is_exposed_for_agent_support():
     assert classify_failure("Error: missing trie node for historical state") == "archive_state_unavailable"

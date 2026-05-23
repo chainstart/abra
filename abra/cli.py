@@ -12,6 +12,7 @@ from abra.agent import run_research_agent
 from abra.bundle import build_result_bundle, validate_result_bundle
 from abra.manifest import load_manifest
 from abra.replay_agent import assess_replay_fixture, validate_evidence_bundle
+from abra.replay_cohort_assessment import assess_replay_cohort
 from abra.replay_cohort import build_replay_cohort
 from abra.smoke import build_smoke_report
 from abra.tools import list_tools
@@ -147,6 +148,15 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_assess.add_argument("--out", required=True, help="Output replay evidence bundle directory.")
     replay_assess.add_argument("--json", action="store_true", help="Print JSON output.")
 
+    replay_assess_cohort = replay_sub.add_parser(
+        "assess-cohort",
+        help="Build replay evidence bundles for every case in a replay cohort.",
+    )
+    replay_assess_cohort.add_argument("--cohort", required=True, help="Replay cohort directory or manifest.json.")
+    replay_assess_cohort.add_argument("--out", required=True, help="Output cohort evidence directory.")
+    replay_assess_cohort.add_argument("--min-level", default="L1", help="Minimum evidence level for per-case validation.")
+    replay_assess_cohort.add_argument("--json", action="store_true", help="Print JSON output.")
+
     evidence = subparsers.add_parser("evidence", help="Validate ABRA evidence bundles.")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
 
@@ -243,6 +253,11 @@ def _handle_replay(args: argparse.Namespace) -> int:
 
     if args.replay_command == "assess":
         payload = assess_replay_fixture(args.case_fixture, args.out)
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
+    if args.replay_command == "assess-cohort":
+        payload = assess_replay_cohort(cohort=args.cohort, out=args.out, min_level=args.min_level)
         _emit(payload, args.json)
         return 0 if payload["status"] == "passed" else 1
 
