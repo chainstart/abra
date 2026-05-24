@@ -699,33 +699,88 @@ def search_onchain_anchor_sources(context: dict[str, str]) -> list[dict[str, str
         return [{"status": "anchor_discovery_skipped:disabled", "url": "", "text": ""}]
 
     results: list[dict[str, str]] = []
+    max_requests = _onchain_search_max_requests()
     for query in _onchain_anchor_queries(context):
-        url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "ABRA/1.0 onchain-anchor-discovery (+https://github.com/chainstart/abra)",
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
-            },
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=15) as response:
-                raw = response.read(1_000_000)
-        except urllib.error.HTTPError as exc:
-            results.append({"status": f"http_{exc.code}", "query": query, "url": url, "text": ""})
-            continue
-        except urllib.error.URLError as exc:
-            reason = getattr(exc, "reason", "")
-            reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
-            results.append(
-                {"status": f"anchor_discovery_failed:{reason_name}", "query": query, "url": url, "text": ""}
-            )
-            continue
-        text = html.unescape(raw.decode("utf-8", errors="replace"))
-        results.append({"status": "fetched", "query": query, "url": url, "text": text})
-        if extract_seed_transaction_hash({"source_text": text}):
-            break
+        for provider in _onchain_search_providers():
+            if len(results) >= max_requests:
+                return results
+            result = _fetch_anchor_search_result(provider, query)
+            results.append(result)
+            if result.get("status") == "fetched" and extract_seed_transaction_hash(
+                {"url": result.get("url", ""), "source_text": result.get("text", "")}
+            ):
+                return results
     return results
+
+
+def _fetch_anchor_search_result(provider: str, query: str) -> dict[str, str]:
+    url = _search_provider_url(provider, query)
+    if not url:
+        return {"status": f"anchor_discovery_skipped:unsupported_search_provider:{provider}", "query": query, "url": "", "text": ""}
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ABRA/1.0 onchain-anchor-discovery (+https://github.com/chainstart/abra)",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_onchain_search_timeout_seconds()) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"status": f"http_{exc.code}", "provider": provider, "query": query, "url": url, "text": ""}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {
+            "status": f"anchor_discovery_failed:{reason_name}",
+            "provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    except OSError as exc:
+        return {
+            "status": f"anchor_discovery_failed:{exc.__class__.__name__}",
+            "provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    text = html.unescape(raw.decode("utf-8", errors="replace"))
+    return {"status": "fetched", "provider": provider, "query": query, "url": url, "text": text}
+
+
+def _search_provider_url(provider: str, query: str) -> str:
+    encoded = quote_plus(query)
+    normalized = provider.strip().lower()
+    if normalized in {"duckduckgo", "ddg"}:
+        return f"https://duckduckgo.com/html/?q={encoded}"
+    if normalized == "bing":
+        return f"https://www.bing.com/search?q={encoded}"
+    if normalized == "brave":
+        return f"https://search.brave.com/search?q={encoded}"
+    return ""
+
+
+def _onchain_search_providers() -> list[str]:
+    raw = os.environ.get("ABRA_ONCHAIN_SEARCH_PROVIDERS", "duckduckgo,bing,brave")
+    providers = [provider.strip().lower() for provider in raw.split(",") if provider.strip()]
+    return _dedupe_strings(providers) or ["duckduckgo"]
+
+
+def _onchain_search_max_requests() -> int:
+    try:
+        return max(1, int(os.environ.get("ABRA_ONCHAIN_SEARCH_MAX_REQUESTS", "6")))
+    except ValueError:
+        return 6
+
+
+def _onchain_search_timeout_seconds() -> float:
+    try:
+        return max(0.5, float(os.environ.get("ABRA_ONCHAIN_SEARCH_TIMEOUT_SECONDS", "5")))
+    except ValueError:
+        return 5.0
 
 
 def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:

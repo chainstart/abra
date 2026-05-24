@@ -715,6 +715,127 @@ def test_evidence_pipeline_prioritizes_security_alerts_for_anchor_discovery_budg
     assert rows["base-security-alert-candidate"]["rpc_backfill_status"] == "receipt_verified"
 
 
+def test_evidence_pipeline_falls_back_when_anchor_search_provider_resets(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY_BUDGET", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_PROVIDERS", "duckduckgo,bing")
+    tx_hash = "0x" + "3" * 64
+    explorer_url = f"https://etherscan.io/tx/{tx_hash}"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Fallback Search Candidate",
+                reference_url="https://x.com/PeckShieldAlert/status/2035565047133401563",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested_urls: list[str] = []
+
+    class FakeSearchResponse:
+        headers = {"content-type": "text/html"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return f'<a href="{explorer_url}">exploit tx</a>'.encode()
+
+    def fake_urlopen(request, timeout: int):
+        del timeout
+        url = request.full_url
+        requested_urls.append(url)
+        if "duckduckgo.com" in url:
+            raise ConnectionResetError("simulated reset")
+        if "bing.com" in url:
+            return FakeSearchResponse()
+        raise AssertionError(url)
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_008)}
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda url: {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""},
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    row = rows[0]
+    assert any("duckduckgo.com" in url for url in requested_urls)
+    assert any("bing.com" in url for url in requested_urls)
+    assert row["anchor_discovery_status"] == "discovered"
+    assert row["anchor_discovery_url"] == explorer_url
+    assert row["anchor_discovery_seed_transaction_hash"] == tx_hash
+    assert row["seed_transaction_hash"] == tx_hash
+    assert row["fork_block"] == "20000008"
+    assert row["rpc_backfill_status"] == "receipt_verified"
+
+
+def test_evidence_pipeline_bounds_anchor_search_requests_and_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY_BUDGET", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_PROVIDERS", "duckduckgo,bing,brave")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_MAX_REQUESTS", "2")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_TIMEOUT_SECONDS", "1.5")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Bounded Search Candidate",
+                reference_url="https://x.com/PeckShieldAlert/status/2035565047133401563",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested: list[tuple[str, float]] = []
+
+    def fake_urlopen(request, timeout: float):
+        requested.append((request.full_url, timeout))
+        raise TimeoutError("simulated slow search")
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda url: {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""},
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    assert len(requested) == 2
+    assert all(timeout == 1.5 for _, timeout in requested)
+    assert all("brave.com" not in url for url, _ in requested)
+    assert rows[0]["anchor_discovery_status"] == "anchor_discovery_failed:TimeoutError"
+    assert rows[0]["rpc_backfill_status"] == "not_attempted"
+
+
 def test_evidence_pipeline_uses_alchemy_receipt_before_anchor_discovery_when_seed_tx_exists(tmp_path, monkeypatch):
     monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
     monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
