@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from abra.chain_support import rpc_url_for_chain
 from abra.evidence_pipeline import produce_evidence_pipeline
 
 
@@ -282,6 +283,196 @@ def test_evidence_pipeline_accepts_official_security_alert_x_accounts_only(tmp_p
     assert rows["peckshield-alert-candidate"]["security_anchor"] == "true"
     assert rows["random-x-candidate"]["security_anchor"] == "false"
     assert json.loads(rows["random-x-candidate"]["security_report_sources"]) == []
+
+
+def test_evidence_pipeline_backfills_tx_hash_and_block_from_security_source_and_alchemy(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    tx_hash = "0x" + "a" * 64
+    source_url = "https://www.certik.com/resources/blog/backfill-candidate-postmortem"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Backfill Candidate",
+                reference_url=source_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    fetched_urls: list[str] = []
+    rpc_calls: list[tuple[str, str, list[str]]] = []
+
+    def fake_source_fetcher(url: str) -> dict[str, str]:
+        fetched_urls.append(url)
+        return {
+            "status": "fetched",
+            "url": url,
+            "text": f"CertiK identified the exploit transaction as {tx_hash}.",
+        }
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        rpc_calls.append((chain, method, params))
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(19_012_345)}
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=fake_source_fetcher,
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    row = rows[0]
+    assert fetched_urls == [source_url]
+    assert rpc_calls == [("ethereum", "eth_getTransactionReceipt", [tx_hash])]
+    assert row["backfill_status"] == "backfilled_onchain_anchor"
+    assert row["seed_transaction_hash"] == tx_hash
+    assert row["fork_block"] == "19012345"
+    assert row["source_fetch_status"] == "fetched"
+    assert row["source_evidence_url"] == source_url
+    assert row["source_extracted_seed_transaction_hash"] == tx_hash
+    assert row["rpc_backfill_status"] == "receipt_verified"
+
+    payload = json.loads((out_dir / "alchemy_onchain_backfill_latest.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["backfilled_onchain_anchor_count"] == 1
+
+
+def test_evidence_pipeline_uses_target_context_when_extracting_weekly_roundup_tx_hashes(tmp_path):
+    squid_tx = "0x" + "1" * 64
+    sas_tx = "0x" + "2" * 64
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    report_url = "https://blocksec.com/blog/weekly-web3-security-incident-roundup-fixture"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Squid Multicall",
+                reference_url=report_url,
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+            _incident(
+                2,
+                target="SAS Token",
+                chain="bsc",
+                reference_url=report_url,
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fake_source_fetcher(_url: str) -> dict[str, str]:
+        return {
+            "status": "fetched",
+            "url": report_url,
+            "text": (
+                f"Squid Multicall exploit transaction: {squid_tx}. "
+                "Additional details on Ethereum. "
+                f"SAS Token attacker transaction: {sas_tx}. "
+                "Additional details on BNB Chain."
+            ),
+        }
+
+    def fake_rpc_caller(_chain: str, _method: str, _params: list[str]) -> dict[str, str]:
+        return {"error": "offline_test"}
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum", "bsc"],
+        source_fetcher=fake_source_fetcher,
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = {row["slug"]: row for row in _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")}
+    assert rows["squid-multicall"]["seed_transaction_hash"] == squid_tx
+    assert rows["sas-token"]["seed_transaction_hash"] == sas_tx
+
+
+def test_evidence_pipeline_skips_default_live_fetch_for_social_alert_urls(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Social Alert Candidate",
+                reference_url="https://x.com/PeckShieldAlert/status/2035565047133401563",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    assert rows[0]["security_anchor"] == "true"
+    assert rows[0]["backfill_status"] == "missing_onchain_anchor"
+    assert rows[0]["source_fetch_status"] == "source_fetch_skipped:social_api_required"
+    assert rows[0]["source_evidence_url"] == ""
+    assert rows[0]["rpc_backfill_status"] == "not_attempted"
+
+
+def test_evidence_pipeline_can_disable_live_security_source_fetch(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_EVIDENCE_SOURCE_FETCH", "0")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Offline Fetch Candidate",
+                reference_url="https://blocksec.com/blog/offline-fetch-candidate",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    assert rows[0]["source_fetch_status"] == "source_fetch_skipped:disabled"
+    assert rows[0]["rpc_backfill_status"] == "not_attempted"
+
+
+def test_alchemy_rpc_url_derivation_prefers_unified_api_key_over_legacy_rpc_env(monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ETH_RPC_URL", "https://mainnet.infura.io/v3/legacy-key")
+    monkeypatch.setenv("BSC_RPC_URL", "https://bsc-mainnet.infura.io/v3/legacy-key")
+
+    assert rpc_url_for_chain("ethereum") == "https://eth-mainnet.g.alchemy.com/v2/alchemy-test-key"
+    assert rpc_url_for_chain("bsc") == "https://bnb-mainnet.g.alchemy.com/v2/alchemy-test-key"
 
 
 def test_defillama_collector_persists_hack_candidates(tmp_path, monkeypatch):

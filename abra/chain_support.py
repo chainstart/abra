@@ -262,6 +262,30 @@ CHAIN_RPC_ENV = {
     "multi_evm": "ETH_RPC_URL",
 }
 
+ALCHEMY_NETWORK_SLUGS = {
+    "ethereum": "eth-mainnet",
+    "polygon": "polygon-mainnet",
+    "bsc": "bnb-mainnet",
+    "bnb": "bnb-mainnet",
+    "arbitrum": "arb-mainnet",
+    "optimism": "opt-mainnet",
+    "op_mainnet": "opt-mainnet",
+    "base": "base-mainnet",
+    "avalanche": "avax-mainnet",
+    "avalanche_c_chain": "avax-mainnet",
+    "blast": "blast-mainnet",
+    "sonic": "sonic-mainnet",
+    "mantle": "mantle-mainnet",
+    "linea": "linea-mainnet",
+    "celo": "celo-mainnet",
+    "polygon_zkevm": "polygonzkevm-mainnet",
+    "zksync": "zksync-mainnet",
+    "berachain": "berachain-mainnet",
+    "solana": "solana-mainnet",
+    "sui": "sui-mainnet",
+    "aptos": "aptos-mainnet",
+}
+
 
 def load_local_environment(root: Path) -> None:
     """Load local ABRA env files without overwriting process variables."""
@@ -358,6 +382,29 @@ def rpc_env_for_chain(chain: str, replay: dict[str, str] | None = None) -> str:
     if rpc_env:
         return rpc_env
     return CHAIN_RPC_ENV.get(normalize_chain(chain), "ARCHIVE_RPC_URL")
+
+
+def rpc_url_for_chain(chain: str) -> str:
+    """Resolve a read-only RPC URL for ABRA evidence backfill.
+
+    The unified Alchemy key is the provider contract for automatic evidence
+    production. Legacy per-chain RPC env vars are retained only as a fallback
+    when no Alchemy key is configured.
+    """
+
+    normalized = normalize_chain(chain)
+    for env_name in ("ALCHEMY_RPC_URL", "ALCHEMY_MAINNET_RPC_URL", "ALCHEMY_HTTP_URL"):
+        value = os.environ.get(env_name)
+        if value:
+            return value
+    api_key = os.environ.get("ALCHEMY_API_KEY")
+    network_slug = ALCHEMY_NETWORK_SLUGS.get(normalized)
+    if api_key and network_slug:
+        return f"https://{network_slug}.g.alchemy.com/v2/{api_key}"
+    value = os.environ.get(rpc_env_for_chain(normalized))
+    if value:
+        return value
+    return ""
 
 
 def rpc_capability_state(*, provider: str, explicit_chains: list[str] | None) -> dict[str, Any]:

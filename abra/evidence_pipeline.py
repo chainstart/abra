@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlparse
 
 from abra.chain_support import (
     chain_id,
@@ -17,6 +21,7 @@ from abra.chain_support import (
     normalize_chain,
     rpc_capability_state,
     rpc_env_for_chain,
+    rpc_url_for_chain,
 )
 from abra.evidence_sources import (
     candidate_discovery_sources,
@@ -73,9 +78,17 @@ ALCHEMY_BACKFILL_FIELDS = [
     "missing_onchain_fields",
     "seed_transaction_hash",
     "fork_block",
+    "source_fetch_status",
+    "source_evidence_url",
+    "source_extracted_seed_transaction_hash",
+    "source_extracted_block",
+    "rpc_backfill_status",
     "reference_url",
     "security_report_sources",
 ]
+
+SourceFetcher = Callable[[str], dict[str, str]]
+RpcCaller = Callable[[str, str, list[str]], dict[str, Any]]
 
 
 def produce_evidence_pipeline(
@@ -84,6 +97,8 @@ def produce_evidence_pipeline(
     out_dir: str | Path = "data/processed",
     rpc_provider: str = "alchemy",
     rpc_supported_chains: list[str] | None = None,
+    source_fetcher: SourceFetcher | None = None,
+    rpc_caller: RpcCaller | None = None,
 ) -> dict[str, Any]:
     """Write explicit candidate enrichment and Alchemy backfill stage products."""
 
@@ -100,7 +115,14 @@ def produce_evidence_pipeline(
 
     enriched_rows = [_enrich_security_evidence(row) for row in incident_rows]
     backfill_rows = [
-        _build_backfill_row(row, rpc_provider=rpc_state["provider"], rpc_supported_chains=rpc_chains)
+        _build_backfill_row(
+            row,
+            rpc_provider=rpc_state["provider"],
+            rpc_supported_chains=rpc_chains,
+            incident_context=row,
+            source_fetcher=source_fetcher or fetch_security_source_text,
+            rpc_caller=rpc_caller or json_rpc_call,
+        )
         for row in enriched_rows
         if row["security_anchor"] == "true"
     ]
@@ -205,10 +227,38 @@ def _build_backfill_row(
     *,
     rpc_provider: str,
     rpc_supported_chains: set[str],
+    incident_context: dict[str, str],
+    source_fetcher: SourceFetcher,
+    rpc_caller: RpcCaller,
 ) -> dict[str, str]:
     chain = normalize_chain(row.get("chain") or "")
     seed_hash = row.get("seed_transaction_hash") or ""
     fork_block = row.get("fork_block") or ""
+    security_sources = _safe_json_list(row.get("security_report_sources") or "[]")
+    source_evidence_url = ""
+    source_fetch_status = "not_required" if seed_hash and fork_block else "not_attempted"
+    source_extracted_hash = ""
+    source_extracted_block = ""
+    if (not seed_hash or not fork_block) and security_sources:
+        source_evidence = _extract_onchain_anchor_from_security_sources(
+            security_sources,
+            incident_context=incident_context,
+            source_fetcher=source_fetcher,
+        )
+        source_fetch_status = source_evidence["source_fetch_status"]
+        source_evidence_url = source_evidence["source_evidence_url"]
+        source_extracted_hash = source_evidence["source_extracted_seed_transaction_hash"]
+        source_extracted_block = source_evidence["source_extracted_block"]
+        seed_hash = seed_hash or source_extracted_hash
+        fork_block = fork_block or source_extracted_block
+
+    rpc_backfill_status = "not_required" if fork_block else "not_attempted"
+    supported = chain_rpc_supported(chain, rpc_supported_chains)
+    if seed_hash and not fork_block and supported:
+        rpc_result = _fetch_fork_block_from_rpc(chain, seed_hash, rpc_caller)
+        rpc_backfill_status = rpc_result["rpc_backfill_status"]
+        fork_block = rpc_result["fork_block"] or fork_block
+
     missing = [
         field
         for field, value in (
@@ -217,9 +267,8 @@ def _build_backfill_row(
         )
         if not value
     ]
-    supported = chain_rpc_supported(chain, rpc_supported_chains)
     if not missing:
-        status = "not_required"
+        status = "not_required" if row.get("seed_transaction_hash") and row.get("fork_block") else "backfilled_onchain_anchor"
     elif not supported:
         status = "blocked_rpc_unsupported"
     else:
@@ -239,6 +288,11 @@ def _build_backfill_row(
         "missing_onchain_fields": "|".join(missing),
         "seed_transaction_hash": seed_hash,
         "fork_block": fork_block,
+        "source_fetch_status": source_fetch_status,
+        "source_evidence_url": source_evidence_url,
+        "source_extracted_seed_transaction_hash": source_extracted_hash,
+        "source_extracted_block": source_extracted_block,
+        "rpc_backfill_status": rpc_backfill_status,
         "reference_url": row["reference_url"],
         "security_report_sources": row["security_report_sources"],
     }
@@ -260,6 +314,9 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
     return {
         "security_anchored_count": len(backfill_rows),
         "not_required_count": sum(1 for row in backfill_rows if row["backfill_status"] == "not_required"),
+        "backfilled_onchain_anchor_count": sum(
+            1 for row in backfill_rows if row["backfill_status"] == "backfilled_onchain_anchor"
+        ),
         "missing_onchain_anchor_count": sum(
             1 for row in backfill_rows if row["backfill_status"] == "missing_onchain_anchor"
         ),
@@ -268,6 +325,173 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
         ),
         "unanchored_skipped_count": sum(1 for row in enriched_rows if row["security_anchor"] != "true"),
     }
+
+
+def _safe_json_list(value: str) -> list[dict[str, str]]:
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [item for item in loaded if isinstance(item, dict)]
+
+
+def _extract_onchain_anchor_from_security_sources(
+    sources: list[dict[str, str]],
+    *,
+    incident_context: dict[str, str],
+    source_fetcher: SourceFetcher,
+) -> dict[str, str]:
+    last_status = "not_attempted"
+    for source in sources:
+        url = str(source.get("url") or "")
+        if not url:
+            continue
+        try:
+            fetched = source_fetcher(url)
+        except Exception as exc:  # pragma: no cover - defensive boundary for live source failures
+            last_status = f"source_fetch_failed:{exc.__class__.__name__}"
+            continue
+        status = str(fetched.get("status") or "fetched")
+        if status != "fetched":
+            last_status = status
+            continue
+        text = str(fetched.get("text") or "")
+        evidence_text = select_incident_context_text(text, incident_context)
+        seed_hash = extract_seed_transaction_hash({"source_text": evidence_text}) or ""
+        block = extract_block_number(evidence_text)
+        if seed_hash or block:
+            return {
+                "source_fetch_status": status,
+                "source_evidence_url": url,
+                "source_extracted_seed_transaction_hash": seed_hash,
+                "source_extracted_block": "" if block is None else str(block),
+            }
+        last_status = "fetched_no_onchain_anchor"
+    return {
+        "source_fetch_status": last_status,
+        "source_evidence_url": "",
+        "source_extracted_seed_transaction_hash": "",
+        "source_extracted_block": "",
+    }
+
+
+def select_incident_context_text(text: str, incident_context: dict[str, str]) -> str:
+    targets = [
+        str(incident_context.get("target") or ""),
+        str(incident_context.get("slug") or "").replace("-", " "),
+    ]
+    haystack = text or ""
+    lower = haystack.lower()
+    for target in targets:
+        normalized = " ".join(target.split()).lower()
+        if not normalized:
+            continue
+        index = lower.find(normalized)
+        if index >= 0:
+            start = index
+            end = min(len(haystack), index + len(normalized) + 1200)
+            return haystack[start:end]
+    if len(re.findall(r"0x[a-fA-F0-9]{64}", haystack)) > 1:
+        return ""
+    return haystack
+
+
+def fetch_security_source_text(url: str) -> dict[str, str]:
+    if _requires_specialized_social_fetch(url):
+        return {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""}
+    if os.environ.get("ABRA_EVIDENCE_SOURCE_FETCH", "").strip().lower() in {"0", "false", "no", "off"}:
+        return {"status": "source_fetch_skipped:disabled", "url": url, "text": ""}
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ABRA/1.0 evidence-backfill (+https://github.com/chainstart/abra)",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content_type = response.headers.get("content-type", "")
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"status": f"http_{exc.code}", "url": url, "text": ""}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {"status": f"source_fetch_failed:{reason_name}", "url": url, "text": ""}
+    text = raw.decode("utf-8", errors="replace")
+    return {"status": "fetched", "url": url, "content_type": content_type, "text": text}
+
+
+def _requires_specialized_social_fetch(url: str) -> bool:
+    host = urlparse(url.strip()).netloc.lower().removeprefix("www.")
+    return host in {"x.com", "twitter.com"}
+
+
+def json_rpc_call(chain: str, method: str, params: list[str]) -> dict[str, Any]:
+    rpc_url = rpc_url_for_chain(chain)
+    if not rpc_url:
+        return {"error": "rpc_url_missing"}
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
+    request = urllib.request.Request(
+        rpc_url,
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"error": f"http_{exc.code}"}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {"error": f"rpc_transport_failed:{reason_name}"}
+    try:
+        decoded = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {"error": "rpc_invalid_json"}
+    if decoded.get("error"):
+        return {"error": "rpc_error", "details": decoded.get("error")}
+    result = decoded.get("result")
+    return result if isinstance(result, dict) else {"error": "rpc_empty_result"}
+
+
+def _fetch_fork_block_from_rpc(chain: str, seed_hash: str, rpc_caller: RpcCaller) -> dict[str, str]:
+    try:
+        receipt = rpc_caller(chain, "eth_getTransactionReceipt", [seed_hash])
+    except Exception as exc:  # pragma: no cover - defensive boundary for live RPC failures
+        return {"rpc_backfill_status": f"rpc_failed:{exc.__class__.__name__}", "fork_block": ""}
+    if not isinstance(receipt, dict):
+        return {"rpc_backfill_status": "rpc_invalid_response", "fork_block": ""}
+    if receipt.get("error"):
+        return {"rpc_backfill_status": str(receipt["error"]), "fork_block": ""}
+    block = parse_rpc_int(receipt.get("blockNumber"))
+    if block is None:
+        return {"rpc_backfill_status": "receipt_missing_block", "fork_block": ""}
+    return {"rpc_backfill_status": "receipt_verified", "fork_block": str(block)}
+
+
+def extract_block_number(text: str) -> int | None:
+    for pattern in (
+        r"\b(?:fork\s+block|replay\s+block|block\s+number|block|height)\s*[:#]?\s*([0-9][0-9,]{3,})\b",
+        r"\bat\s+block\s+([0-9][0-9,]{3,})\b",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return parse_int(match.group(1))
+    return None
+
+
+def parse_rpc_int(value: Any) -> int | None:
+    if isinstance(value, str) and value.startswith("0x"):
+        try:
+            return int(value, 16)
+        except ValueError:
+            return None
+    return parse_int(value)
 
 
 def _resolve_repo_path(root: Path, value: str | Path) -> Path:
