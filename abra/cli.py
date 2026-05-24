@@ -111,12 +111,12 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_cohort.add_argument(
         "--replay-results-csv",
         default="data/processed/replay_results.csv",
-        help="Optional replay result CSV used to attach fork blocks and replay tests.",
+        help="Optional replay result CSV used only to attach replay fixture metadata to already-qualified incidents.",
     )
     replay_cohort.add_argument(
         "--event-cards-dir",
         default="reports/events",
-        help="Directory containing ABRA incident event cards.",
+        help="Directory containing ABRA incident cards used as local fixture metadata, never as standalone candidate sources.",
     )
     replay_cohort.add_argument("--out", required=True, help="Output cohort directory.")
     replay_cohort.add_argument("--min-cases", type=int, default=10, help="Minimum eligible cases required.")
@@ -145,7 +145,7 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_cohort.add_argument(
         "--no-evidence-candidates",
         action="store_true",
-        help="Disable security-report and replay-metadata diagnostic candidates.",
+        help="Disable security-anchor backfill candidates and keep only security-anchored incidents that already have tx hash and replay block.",
     )
     replay_cohort.add_argument(
         "--allow-missing-seed-transaction-hash",

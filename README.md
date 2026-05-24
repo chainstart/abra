@@ -165,9 +165,13 @@ Outputs:
 
 Use `abra replay cohort` before replay assessment when ARA asks ABRA to produce blockchain
 evidence. The cohort builder first consumes public incident/security-source candidates, enriches
-them with local ABRA event cards and replay metadata, then filters evidence production to chains
-covered by the configured Alchemy capability. Missing transaction hashes or fork blocks remain
-visible as diagnostic evidence boundaries instead of being silently treated as replay-ready cases.
+them through a four-stage boundary: `candidate_discovery` from public sources such as SlowMist and
+DefiLlama, `security_evidence_enrichment` from anchored security/public reports, optional
+`alchemy_onchain_backfill` only for security-anchored incidents that still miss tx hashes or replay
+blocks, and `replay_cohort_selection` from those staged outputs. Local event cards and
+`replay_results.csv` only attach fixture metadata to already-qualified incidents; they never create
+new candidates on their own. Missing transaction hashes or fork blocks remain visible as diagnostic
+evidence boundaries instead of being silently treated as replay-ready cases.
 
 ```bash
 ALCHEMY_API_KEY=... \

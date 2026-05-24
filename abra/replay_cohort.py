@@ -175,12 +175,6 @@ def build_replay_cohort(
     selected_ids = _selected_incident_ids(selected_path)
     replay_by_slug = _replay_metadata_by_slug(replay_path)
     cards_by_slug = _event_cards_by_slug(cards_dir)
-    include_replay_metadata_candidates = _should_include_replay_metadata_candidates(
-        root=root,
-        incidents_path=incidents_path,
-        replay_path=replay_path,
-        replay_results_csv=replay_results_csv,
-    )
     rpc_state = _rpc_capability_state(provider=rpc_provider, explicit_chains=rpc_supported_chains)
     rpc_chains = rpc_state["supported_chains"]
 
@@ -201,22 +195,6 @@ def build_replay_cohort(
             exclusions.append(_exclusion_entry(normalized, reason))
             continue
         candidates.append(normalized)
-
-    if include_evidence_candidates and include_replay_metadata_candidates:
-        for normalized in _replay_metadata_candidates(replay_by_slug, cards_by_slug, rpc_chains):
-            if any(candidate["slug"] == normalized["slug"] for candidate in candidates):
-                continue
-            reason = _exclusion_reason(
-                normalized,
-                evm_only=evm_only,
-                require_seed_transaction_hash=require_seed_transaction_hash,
-                require_replay_block=require_replay_block,
-                include_evidence_candidates=include_evidence_candidates,
-            )
-            if reason:
-                exclusions.append(_exclusion_entry(normalized, reason))
-                continue
-            candidates.append(normalized)
 
     candidates.sort(key=_candidate_score, reverse=True)
     selected = candidates[:max_cases]
@@ -268,9 +246,8 @@ def build_replay_cohort(
             "eligible_before_case_count": len(candidates),
             "selected_count": len(manifest_cases),
             "excluded_count": len(exclusions),
-            "selected_replay_metadata_count": sum(
-                1 for case in selected if case["selected_source"] == "replay_results_csv"
-            ),
+            "selected_replay_metadata_count": 0,
+            "selected_fixture_metadata_attached_count": sum(1 for case in selected if case["fixture_metadata_attached"]),
             "selected_security_report_count": sum(1 for case in selected if case["security_report_sources"]),
             "selected_rpc_supported_count": sum(1 for case in selected if case["rpc_supported"]),
             "missing_seed_transaction_hash_count": sum(
@@ -339,21 +316,6 @@ def _resolve_optional_repo_path(root: Path, value: str | Path | None) -> Path | 
         return None
     path = _resolve_repo_path(root, value)
     return path if path.exists() else None
-
-
-def _should_include_replay_metadata_candidates(
-    *,
-    root: Path,
-    incidents_path: Path,
-    replay_path: Path,
-    replay_results_csv: str | Path,
-) -> bool:
-    default_incidents = root / "data/processed/incidents_normalized_latest.csv"
-    default_replay = root / "data/processed/replay_results.csv"
-    replay_arg = str(replay_results_csv)
-    using_implicit_default_replay = replay_arg == "data/processed/replay_results.csv" and replay_path == default_replay
-    using_custom_incidents = incidents_path != default_incidents
-    return not (using_custom_incidents and using_implicit_default_replay)
 
 
 def _load_local_environment(root: Path) -> None:
@@ -461,9 +423,13 @@ def _normalize_incident(
     )
     reference = (row.get("reference_url") or card.get("reference_url") or "").strip()
     security_sources = _security_report_sources(row, card)
+    security_anchor = bool(security_sources)
     rpc_env = _rpc_env_for_chain(inferred_chain, replay)
     rpc_supported = _chain_rpc_supported(inferred_chain, rpc_supported_chains)
+    fixture_metadata_attached = bool(replay or event_card)
     missing: list[str] = []
+    if not security_anchor:
+        missing.append("missing_security_anchor")
     if not seed_hash:
         missing.append("missing_seed_transaction_hash")
     if not fork_block:
@@ -493,6 +459,7 @@ def _normalize_incident(
         "fixture_source": str(event_card) if event_card else "",
         "event_card": str(event_card) if event_card else "",
         "security_report_sources": security_sources,
+        "security_anchor": security_anchor,
         "rpc_env": rpc_env,
         "rpc_supported": rpc_supported,
         "replay_test": replay.get("replay_test") or "",
@@ -502,75 +469,12 @@ def _normalize_incident(
         "replay_blocker": replay.get("blocker") or "",
         "verified": _parse_bool(replay.get("verified")),
         "fixture_result": _fixture_result_from_replay(replay),
-        "selected_source": "selected_incidents_csv" if row.get("incident_id") in selected_ids else "incidents_csv",
+        "fixture_metadata_attached": fixture_metadata_attached,
+        "selected_source": "selected_incidents_csv" if row.get("incident_id") in selected_ids else "candidate_discovery",
         "description": row.get("description") or "",
         "missing_fields": missing,
         "raw": row,
     }
-
-
-def _replay_metadata_candidates(
-    replay_by_slug: dict[str, dict[str, str]],
-    cards_by_slug: dict[str, Path],
-    rpc_supported_chains: set[str],
-) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for slug, replay in replay_by_slug.items():
-        event_card = cards_by_slug.get(slug)
-        card = _event_card_metadata(event_card)
-        incident = replay.get("incident") or card.get("incident") or slug.replace("-", " ").title()
-        chain = _normalize_chain(replay.get("chain") or "ethereum")
-        seed_hash = _extract_seed_transaction_hash({}, replay, card)
-        fork_block = _parse_int(replay.get("fork_block") or card.get("fork_block"))
-        reference = card.get("reference_url") or ""
-        row = {
-            "target": incident,
-            "reference_url": reference,
-            "source_url": reference,
-            "description": "",
-        }
-        missing: list[str] = []
-        if not seed_hash:
-            missing.append("missing_seed_transaction_hash")
-        if not fork_block:
-            missing.append("missing_replay_block")
-        if not reference:
-            missing.append("missing_provenance_url")
-        candidates.append(
-            {
-                "incident_id": _sha1([slug, incident]),
-                "incident": incident,
-                "slug": slug,
-                "event_date": card.get("event_date") or "",
-                "is_defi": True,
-                "chain": chain,
-                "chain_id": _chain_id(chain),
-                "attack_family": replay.get("attack_family") or card.get("attack_family") or "other",
-                "attack_method_raw": card.get("attack_method_raw") or "",
-                "loss_usd": _parse_float(replay.get("loss_usd") or card.get("loss_usd")),
-                "seed_transaction_hash": seed_hash,
-                "fork_block": fork_block,
-                "provenance_url": reference,
-                "source_url": reference,
-                "fixture_source": str(event_card) if event_card else "",
-                "event_card": str(event_card) if event_card else "",
-                "security_report_sources": _security_report_sources(row, card),
-                "rpc_env": _rpc_env_for_chain(chain, replay),
-                "rpc_supported": _chain_rpc_supported(chain, rpc_supported_chains),
-                "replay_test": replay.get("replay_test") or "",
-                "metadata_test": replay.get("metadata_test") or "",
-                "test_path": replay.get("test_path") or "",
-                "replay_status": replay.get("status") or "",
-                "replay_blocker": replay.get("blocker") or "",
-                "verified": _parse_bool(replay.get("verified")),
-                "fixture_result": _fixture_result_from_replay(replay),
-                "selected_source": "replay_results_csv",
-                "description": "",
-                "missing_fields": missing,
-                "raw": replay,
-            }
-        )
-    return candidates
 
 
 def _infer_chain(row: dict[str, str], replay: dict[str, str]) -> str:
@@ -743,11 +647,15 @@ def _exclusion_reason(
         return "rpc_chain_unsupported"
     if not case["provenance_url"]:
         return "missing_provenance"
-    evidence_candidate = bool(
-        include_evidence_candidates
-        and case["rpc_supported"]
-        and (case["security_report_sources"] or case["event_card"] or case["selected_source"] == "replay_results_csv")
-    )
+    if not case["security_anchor"]:
+        return "missing_security_anchor"
+    if not include_evidence_candidates:
+        if not case["seed_transaction_hash"]:
+            return "missing_seed_transaction_hash"
+        if not case["fork_block"]:
+            return "missing_replay_block"
+        return None
+    evidence_candidate = bool(include_evidence_candidates and case["rpc_supported"] and case["security_anchor"])
     if require_seed_transaction_hash and not case["seed_transaction_hash"] and not evidence_candidate:
         return "missing_seed_transaction_hash"
     if require_replay_block and not case["fork_block"] and not evidence_candidate:
@@ -769,6 +677,7 @@ def _exclusion_entry(case: dict[str, Any], reason: str) -> dict[str, Any]:
         "provenance_url": case["provenance_url"],
         "rpc_env": case.get("rpc_env") or "",
         "rpc_supported": bool(case.get("rpc_supported")),
+        "security_anchor": bool(case.get("security_anchor")),
         "security_report_sources": case.get("security_report_sources") or [],
     }
 
@@ -804,6 +713,7 @@ def _case_payload(case: dict[str, Any], generated_at: str) -> dict[str, Any]:
         "fixture_source": case["fixture_source"],
         "event_card": case["event_card"],
         "security_report_sources": case["security_report_sources"],
+        "security_anchor": case["security_anchor"],
         "rpc_env": case["rpc_env"],
         "rpc_supported": case["rpc_supported"],
         "replay_test": case["replay_test"],
@@ -811,6 +721,7 @@ def _case_payload(case: dict[str, Any], generated_at: str) -> dict[str, Any]:
         "test_path": case["test_path"],
         "replay_status": case["replay_status"],
         "fixture_result": case["fixture_result"],
+        "fixture_metadata_attached": case["fixture_metadata_attached"],
         "eligibility": eligibility,
         "evidence_level_target": "L4" if case["verified"] else "L1",
         "missing_fields": list(case["missing_fields"]),
@@ -819,11 +730,13 @@ def _case_payload(case: dict[str, Any], generated_at: str) -> dict[str, Any]:
 
 
 def _case_eligibility(case: dict[str, Any]) -> str:
-    if case["replay_test"] and case["test_path"]:
-        return "catalog_replay_assessment"
-    if case["security_report_sources"] or case["event_card"]:
-        return "diagnostic_replay_assessment"
-    return "candidate_only"
+    if case["replay_test"] and case["test_path"] and case["security_anchor"]:
+        return "security_anchor_with_replay_fixture"
+    if case["security_anchor"] and (not case["seed_transaction_hash"] or not case["fork_block"]):
+        return "security_anchor_backfill_required"
+    if case["security_anchor"]:
+        return "security_anchor_ready"
+    return "candidate_discovery_only"
 
 
 def _cohort_warnings(selected: list[dict[str, Any]], rpc_state: dict[str, Any]) -> list[str]:
@@ -833,8 +746,6 @@ def _cohort_warnings(selected: list[dict[str, Any]], rpc_state: dict[str, Any]) 
         warnings.append(missing_rpc_configuration)
     if any(not case["seed_transaction_hash"] or not case["fork_block"] for case in selected):
         warnings.append("selected_cases_include_diagnostic_evidence_boundaries")
-    if any(_case_eligibility(case) == "candidate_only" for case in selected):
-        warnings.append("selected_cases_include_candidate_only_records")
     return warnings
 
 

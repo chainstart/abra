@@ -295,6 +295,127 @@ def test_replay_cohort_treats_alchemy_l2s_as_evm_supported(tmp_path, monkeypatch
     assert all(case["rpc_supported"] is True for case in manifest["cases"])
 
 
+def test_replay_cohort_requires_security_anchor_before_alchemy_backfill(tmp_path):
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Unanchored Ethereum Candidate",
+                reference_url="https://example.test/incidents/unanchored-ethereum-candidate",
+                source_url="https://example.test/feed/unanchored-ethereum-candidate",
+                description="Ethereum oracle manipulation candidate without any anchored security report.",
+            )
+        ],
+    )
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=1,
+        max_cases=1,
+        evm_only=True,
+        require_seed_transaction_hash=True,
+        require_replay_block=True,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["case_count"] == 0
+    assert "insufficient_eligible_cases" in payload["errors"]
+
+    exclusion_log = json.loads((tmp_path / "cohort" / "exclusion_log.json").read_text(encoding="utf-8"))
+    excluded = {(entry["slug"], entry["reason"]) for entry in exclusion_log["entries"]}
+    assert ("unanchored-ethereum-candidate", "missing_security_anchor") in excluded
+
+
+def test_replay_cohort_uses_replay_results_only_as_fixture_metadata(tmp_path):
+    incidents_csv = tmp_path / "incidents.csv"
+    replay_results_csv = tmp_path / "replay_results.csv"
+    event_cards_dir = tmp_path / "events"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Anchored SlowMist Candidate",
+                reference_url="https://hacked.slowmist.io/incidents/anchored-slowmist-candidate",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                description="SlowMist reported an Ethereum oracle manipulation candidate.",
+            )
+        ],
+    )
+    _write_replay_results_csv(
+        replay_results_csv,
+        [
+            {
+                "incident": "Anchored SlowMist Candidate",
+                "slug": "anchored-slowmist-candidate",
+                "chain": "ethereum",
+                "rpc_env": "ETH_RPC_URL",
+                "attack_family": "oracle_manipulation",
+                "loss_usd": 1_000_000,
+                "fork_block": 17_000_001,
+                "test_path": "test/replay/AnchoredSlowMistCandidate.t.sol",
+                "replay_test": "test_AnchoredSlowMistCandidate",
+                "metadata_test": "test_AnchoredSlowMistCandidateMetadata",
+                "status": "verified",
+                "metadata_status": "passed",
+                "verified": "True",
+            },
+            {
+                "incident": "Replay Only Fixture",
+                "slug": "replay-only-fixture",
+                "chain": "ethereum",
+                "rpc_env": "ETH_RPC_URL",
+                "attack_family": "flash_loan",
+                "loss_usd": 2_000_000,
+                "fork_block": 17_000_002,
+                "test_path": "test/replay/ReplayOnlyFixture.t.sol",
+                "replay_test": "test_ReplayOnlyFixture",
+                "metadata_test": "test_ReplayOnlyFixtureMetadata",
+                "status": "verified",
+                "metadata_status": "passed",
+                "verified": "True",
+            },
+        ],
+    )
+    _write_event_card(
+        event_cards_dir / "2025-01-01_replay-only-fixture_abcdef01.md",
+        slug="replay-only-fixture",
+        incident="Replay Only Fixture",
+        reference_url="https://hacked.slowmist.io/incidents/replay-only-fixture",
+        fork_block=17_000_002,
+    )
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        replay_results_csv=replay_results_csv,
+        event_cards_dir=event_cards_dir,
+        out=tmp_path / "cohort",
+        min_cases=1,
+        max_cases=2,
+        evm_only=True,
+        require_seed_transaction_hash=False,
+        require_replay_block=False,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    assert payload["status"] == "passed"
+    assert payload["case_count"] == 1
+    assert payload["quality"]["selected_replay_metadata_count"] == 0
+    assert payload["quality"]["selected_fixture_metadata_attached_count"] == 1
+
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    assert [case["slug"] for case in manifest["cases"]] == ["anchored-slowmist-candidate"]
+    case = manifest["cases"][0]
+    assert case["replay_test"] == "test_AnchoredSlowMistCandidate"
+    assert case["test_path"] == "test/replay/AnchoredSlowMistCandidate.t.sol"
+    assert case["fixture_result"]["status"] == "verified"
+    assert case["eligibility"] == "security_anchor_with_replay_fixture"
+
+
 def test_replay_cohort_enriches_public_candidates_and_filters_by_supported_rpc_chain(tmp_path):
     incidents_csv = tmp_path / "incidents.csv"
     replay_results_csv = tmp_path / "replay_results.csv"
@@ -370,30 +491,29 @@ def test_replay_cohort_enriches_public_candidates_and_filters_by_supported_rpc_c
         rpc_supported_chains=["ethereum"],
     )
 
-    assert payload["status"] == "passed"
-    assert payload["case_count"] == 10
-    assert payload["quality"]["selected_replay_metadata_count"] == 9
-    assert payload["quality"]["selected_security_report_count"] >= 1
-    assert payload["quality"]["selected_rpc_supported_count"] == 10
-    assert payload["quality"]["missing_seed_transaction_hash_count"] == 10
+    assert payload["status"] == "failed"
+    assert payload["case_count"] == 2
+    assert payload["quality"]["selected_replay_metadata_count"] == 0
+    assert payload["quality"]["selected_security_report_count"] == 2
+    assert payload["quality"]["selected_fixture_metadata_attached_count"] == 0
+    assert payload["quality"]["selected_rpc_supported_count"] == 2
+    assert payload["quality"]["missing_seed_transaction_hash_count"] == 2
+    assert "insufficient_eligible_cases" in payload["errors"]
     assert "selected_cases_include_diagnostic_evidence_boundaries" in payload["warnings"]
 
     manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["case_count"] == 10
+    assert manifest["case_count"] == 2
+    assert {case["slug"] for case in manifest["cases"]} == {"slowmist-candidate", "certik-candidate"}
     eligibilities = {case["eligibility"] for case in manifest["cases"]}
-    assert "catalog_replay_assessment" in eligibilities
-    assert "diagnostic_replay_assessment" in eligibilities
+    assert eligibilities == {"security_anchor_backfill_required"}
     assert {case["chain"] for case in manifest["cases"]} == {"ethereum"}
     assert all(case["rpc_supported"] is True for case in manifest["cases"])
-    catalog_case = next(case for case in manifest["cases"] if case["eligibility"] == "catalog_replay_assessment")
-    assert catalog_case["test_path"].startswith("test/replay/CatalogReplay")
-    assert catalog_case["fixture_result"]["status"] == "no_rpc"
-    diagnostic_case = next(case for case in manifest["cases"] if case["eligibility"] == "diagnostic_replay_assessment")
-    assert diagnostic_case["security_report_sources"]
-    assert diagnostic_case["evidence_level_target"] == "L1"
+    assert all(case["security_report_sources"] for case in manifest["cases"])
+    assert all(case["evidence_level_target"] == "L1" for case in manifest["cases"])
     exclusion_log = json.loads((tmp_path / "cohort" / "exclusion_log.json").read_text(encoding="utf-8"))
     excluded = {(entry["slug"], entry["reason"]) for entry in exclusion_log["entries"]}
     assert ("unsupported-polygon-candidate", "rpc_chain_unsupported") in excluded
+    assert ("catalog-replay-1", "missing_security_anchor") not in excluded
 
 
 def test_replay_cohort_cli_round_trip(tmp_path):
