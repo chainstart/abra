@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import importlib.util
 import json
@@ -911,6 +912,95 @@ def test_evidence_pipeline_uses_security_source_specific_anchor_queries(tmp_path
     assert row["anchor_discovery_seed_transaction_hash"] == tx_hash
     assert row["seed_transaction_hash"] == tx_hash
     assert row["fork_block"] == "20000009"
+    assert row["rpc_backfill_status"] == "receipt_verified"
+
+
+def test_evidence_pipeline_fetches_trusted_search_result_pages_for_tx_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY_BUDGET", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_PROVIDERS", "bing")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_MAX_REQUESTS", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_SECOND_HOP_MAX_REQUESTS", "2")
+    tx_hash = "0x" + "5" * 64
+    trusted_url = "https://blocksec.com/blog/trusted-second-hop-candidate-analysis"
+    bing_redirect = (
+        "https://www.bing.com/ck/a?u=a1"
+        + base64.urlsafe_b64encode(trusted_url.encode()).decode().rstrip("=")
+    )
+    explorer_url = f"https://etherscan.io/tx/{tx_hash}"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Trusted Second Hop Candidate",
+                reference_url="https://x.com/Phalcon_xyz/status/2054593377438421492",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested_urls: list[str] = []
+
+    class FakeSearchResponse:
+        headers = {"content-type": "text/html"}
+
+        def __init__(self, text: str):
+            self.text = text
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return self.text.encode()
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        requested_urls.append(request.full_url)
+        if "bing.com/search" in request.full_url:
+            return FakeSearchResponse(
+                f'<a href="https://random.example/report">noise</a>'
+                f'<a href="{bing_redirect}">BlockSec analysis</a>'
+            )
+        if request.full_url == trusted_url:
+            return FakeSearchResponse(
+                f"Trusted Second Hop Candidate exploit transaction: {explorer_url}"
+            )
+        raise AssertionError(request.full_url)
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_010)}
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda url: {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""},
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    row = rows[0]
+    assert any("bing.com/search" in url for url in requested_urls)
+    assert trusted_url in requested_urls
+    assert row["anchor_discovery_status"] == "discovered"
+    assert row["anchor_discovery_url"] == explorer_url
+    assert row["anchor_discovery_seed_transaction_hash"] == tx_hash
+    assert row["seed_transaction_hash"] == tx_hash
+    assert row["fork_block"] == "20000010"
     assert row["rpc_backfill_status"] == "receipt_verified"
 
 

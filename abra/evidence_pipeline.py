@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import base64
+import binascii
 import html
 import json
 import os
@@ -12,7 +14,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 from abra.chain_support import (
     chain_id,
@@ -700,16 +702,42 @@ def search_onchain_anchor_sources(context: dict[str, str]) -> list[dict[str, str
 
     results: list[dict[str, str]] = []
     max_requests = _onchain_search_max_requests()
+    search_requests = 0
+    second_hop_remaining = _onchain_search_second_hop_max_requests()
+    second_hop_seen: set[str] = set()
     for query in _onchain_anchor_queries(context):
         for provider in _onchain_search_providers():
-            if len(results) >= max_requests:
+            if search_requests >= max_requests:
                 return results
             result = _fetch_anchor_search_result(provider, query)
+            search_requests += 1
             results.append(result)
             if result.get("status") == "fetched" and extract_seed_transaction_hash(
                 {"url": result.get("url", ""), "source_text": result.get("text", "")}
             ):
                 return results
+            if result.get("status") != "fetched" or second_hop_remaining <= 0:
+                continue
+            for trusted_url in _trusted_anchor_links_from_search_result(result):
+                if second_hop_remaining <= 0:
+                    break
+                if trusted_url in second_hop_seen:
+                    continue
+                second_hop_seen.add(trusted_url)
+                second_hop_remaining -= 1
+                second_hop_result = _fetch_trusted_anchor_page(
+                    trusted_url,
+                    provider=provider,
+                    query=query,
+                )
+                results.append(second_hop_result)
+                if second_hop_result.get("status") == "fetched" and extract_seed_transaction_hash(
+                    {
+                        "url": second_hop_result.get("url", ""),
+                        "source_text": second_hop_result.get("text", ""),
+                    }
+                ):
+                    return results
     return results
 
 
@@ -751,6 +779,57 @@ def _fetch_anchor_search_result(provider: str, query: str) -> dict[str, str]:
     return {"status": "fetched", "provider": provider, "query": query, "url": url, "text": text}
 
 
+def _fetch_trusted_anchor_page(url: str, *, provider: str, query: str) -> dict[str, str]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ABRA/1.0 onchain-anchor-discovery (+https://github.com/chainstart/abra)",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_onchain_search_timeout_seconds()) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {
+            "status": f"anchor_discovery_second_hop_http_{exc.code}",
+            "provider": "second_hop",
+            "source_provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {
+            "status": f"anchor_discovery_second_hop_failed:{reason_name}",
+            "provider": "second_hop",
+            "source_provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    except OSError as exc:
+        return {
+            "status": f"anchor_discovery_second_hop_failed:{exc.__class__.__name__}",
+            "provider": "second_hop",
+            "source_provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    text = html.unescape(raw.decode("utf-8", errors="replace"))
+    return {
+        "status": "fetched",
+        "provider": "second_hop",
+        "source_provider": provider,
+        "query": query,
+        "url": url,
+        "text": text,
+    }
+
+
 def _search_provider_url(provider: str, query: str) -> str:
     encoded = quote_plus(query)
     normalized = provider.strip().lower()
@@ -781,6 +860,101 @@ def _onchain_search_timeout_seconds() -> float:
         return max(0.5, float(os.environ.get("ABRA_ONCHAIN_SEARCH_TIMEOUT_SECONDS", "5")))
     except ValueError:
         return 5.0
+
+
+def _onchain_search_second_hop_max_requests() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_ONCHAIN_SEARCH_SECOND_HOP_MAX_REQUESTS", "3")))
+    except ValueError:
+        return 3
+
+
+def _trusted_anchor_links_from_search_result(result: dict[str, str]) -> list[str]:
+    return [
+        link
+        for link in _extract_candidate_links(str(result.get("text") or ""), base_url=str(result.get("url") or ""))
+        if _is_trusted_anchor_url(link)
+    ]
+
+
+def _extract_candidate_links(text: str, *, base_url: str) -> list[str]:
+    decoded = html.unescape(text or "")
+    candidates: list[str] = []
+    candidates.extend(
+        match.group(1)
+        for match in re.finditer(r"""href\s*=\s*["']([^"']+)["']""", decoded, flags=re.IGNORECASE)
+    )
+    candidates.extend(match.group(0) for match in re.finditer(r"""https?://[^\s"'<>]+""", decoded))
+
+    links: list[str] = []
+    for candidate in candidates:
+        normalized = html.unescape(candidate).strip().rstrip(".,;)")
+        if not normalized:
+            continue
+        unwrapped = _unwrap_search_redirect_url(urljoin(base_url, normalized))
+        if unwrapped:
+            links.append(unwrapped)
+    return _dedupe_strings(links)
+
+
+def _unwrap_search_redirect_url(url: str) -> str:
+    candidate = html.unescape(url).strip()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate)
+    for key in ("uddg", "url", "q", "u"):
+        for value in parse_qs(parsed.query).get(key, []):
+            decoded = unquote(value).strip()
+            if _is_http_url(decoded):
+                return decoded
+            bing_url = _decode_bing_redirect_url(decoded)
+            if bing_url:
+                return bing_url
+    return candidate if _is_http_url(candidate) else ""
+
+
+def _decode_bing_redirect_url(value: str) -> str:
+    token = value[2:] if value.startswith("a1") else value
+    try:
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8", errors="replace")
+    except (ValueError, binascii.Error):
+        return ""
+    return decoded if _is_http_url(decoded) else ""
+
+
+def _is_http_url(value: str) -> bool:
+    return urlparse(value).scheme in {"http", "https"}
+
+
+def _is_trusted_anchor_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = parsed.netloc.lower().split("@")[-1].split(":", 1)[0].removeprefix("www.")
+    return any(host == domain or host.endswith(f".{domain}") for domain in _trusted_anchor_domains())
+
+
+def _trusted_anchor_domains() -> list[str]:
+    return [
+        "etherscan.io",
+        "basescan.org",
+        "bscscan.com",
+        "arbiscan.io",
+        "polygonscan.com",
+        "snowtrace.io",
+        "celoscan.io",
+        "era.zksync.network",
+        "zkevm.polygonscan.com",
+        "blocksec.com",
+        "blockaid.io",
+        "slowmist.io",
+        "peckshield.com",
+        "certik.com",
+        "rekt.news",
+        "immunefi.com",
+        "defimon.xyz",
+        "defimon.io",
+    ]
 
 
 def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:
