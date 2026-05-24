@@ -822,7 +822,7 @@ def test_evidence_pipeline_bounds_anchor_search_requests_and_timeout(tmp_path, m
         raise TimeoutError("simulated slow search")
 
     monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
-    produce_evidence_pipeline(
+    payload = produce_evidence_pipeline(
         incidents_csv=incidents_csv,
         out_dir=out_dir,
         rpc_supported_chains=["ethereum"],
@@ -831,10 +831,20 @@ def test_evidence_pipeline_bounds_anchor_search_requests_and_timeout(tmp_path, m
 
     rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
     assert len(rows) == 1
+    assert payload["status"] == "failed"
+    assert "anchor_discovery_attempted_without_onchain_anchor" in payload["errors"]
+    assert "anchor_discovery_all_attempts_timed_out" in payload["errors"]
+    assert payload["summary"]["anchor_discovery_attempted_count"] == 1
+    assert payload["summary"]["anchor_discovery_result_count"] == 2
+    assert payload["summary"]["anchor_discovery_timeout_result_count"] == 2
+    assert payload["summary"]["anchor_discovery_exhausted_count"] == 1
     assert len(requested) == 2
     assert all(timeout == 1.5 for _, timeout in requested)
     assert all("brave.com" not in url for url, _ in requested)
-    assert rows[0]["anchor_discovery_status"] == "anchor_discovery_failed:TimeoutError"
+    assert rows[0]["anchor_discovery_status"] == "anchor_discovery_search_exhausted:all_timeouts"
+    assert rows[0]["anchor_discovery_attempt_count"] == "2"
+    assert rows[0]["anchor_discovery_timeout_count"] == "2"
+    assert rows[0]["anchor_discovery_result_statuses"] == "anchor_discovery_failed:TimeoutError"
     assert rows[0]["rpc_backfill_status"] == "not_attempted"
 
 

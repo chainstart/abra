@@ -89,6 +89,9 @@ ALCHEMY_BACKFILL_FIELDS = [
     "anchor_discovery_url",
     "anchor_discovery_seed_transaction_hash",
     "anchor_discovery_block",
+    "anchor_discovery_attempt_count",
+    "anchor_discovery_timeout_count",
+    "anchor_discovery_result_statuses",
     "rpc_backfill_status",
     "reference_url",
     "security_report_sources",
@@ -152,6 +155,7 @@ def produce_evidence_pipeline(
         for row in backfill_candidate_rows
     ]
 
+    security_summary = _security_summary(enriched_rows, incident_rows)
     _write_csv(out_path / SECURITY_EVIDENCE_CSV, enriched_rows, SECURITY_EVIDENCE_FIELDS)
     _write_json(
         out_path / SECURITY_EVIDENCE_JSON,
@@ -160,10 +164,11 @@ def produce_evidence_pipeline(
             "stage": "security_evidence_enrichment",
             "generated_at": generated_at,
             "source_incidents_csv": str(incidents_path),
-            "summary": _security_summary(enriched_rows, incident_rows),
+            "summary": security_summary,
             "rows": enriched_rows,
         },
     )
+    backfill_summary = _backfill_summary(enriched_rows, backfill_rows)
     _write_csv(out_path / ALCHEMY_BACKFILL_CSV, backfill_rows, ALCHEMY_BACKFILL_FIELDS)
     _write_json(
         out_path / ALCHEMY_BACKFILL_JSON,
@@ -178,7 +183,7 @@ def produce_evidence_pipeline(
                 "configuration_sources": rpc_state["configuration_sources"],
                 "supported_chains": sorted(rpc_chains),
             },
-            "summary": _backfill_summary(enriched_rows, backfill_rows),
+            "summary": backfill_summary,
             "rows": backfill_rows,
         },
     )
@@ -186,6 +191,7 @@ def produce_evidence_pipeline(
     errors: list[str] = []
     if rpc_state["missing_configuration_error"]:
         errors.append(rpc_state["missing_configuration_error"])
+    errors.extend(_evidence_quality_errors(backfill_summary))
 
     return {
         "schema_version": EVIDENCE_PIPELINE_SCHEMA_VERSION,
@@ -193,8 +199,10 @@ def produce_evidence_pipeline(
         "source_incidents_csv": str(incidents_path),
         "out_dir": str(out_path),
         "summary": {
-            **_security_summary(enriched_rows, incident_rows),
+            **security_summary,
             "alchemy_backfill_candidate_count": len(backfill_rows),
+            **backfill_summary,
+            "security_anchored_count": security_summary["security_anchored_count"],
         },
         "errors": errors,
         "artifacts": {
@@ -271,6 +279,9 @@ def _build_backfill_row(
     anchor_discovery_url = ""
     anchor_discovery_hash = ""
     anchor_discovery_block = ""
+    anchor_discovery_attempt_count = 0
+    anchor_discovery_timeout_count = 0
+    anchor_discovery_result_statuses = ""
     if (not seed_hash or not fork_block) and evidence_sources:
         source_evidence = _extract_onchain_anchor_from_security_sources(
             evidence_sources,
@@ -306,6 +317,9 @@ def _build_backfill_row(
             anchor_discovery_url = discovered["anchor_discovery_url"]
             anchor_discovery_hash = discovered["anchor_discovery_seed_transaction_hash"]
             anchor_discovery_block = discovered["anchor_discovery_block"]
+            anchor_discovery_attempt_count = parse_int(discovered.get("anchor_discovery_attempt_count")) or 0
+            anchor_discovery_timeout_count = parse_int(discovered.get("anchor_discovery_timeout_count")) or 0
+            anchor_discovery_result_statuses = discovered.get("anchor_discovery_result_statuses") or ""
             seed_hash = seed_hash or anchor_discovery_hash
             fork_block = fork_block or anchor_discovery_block
             if seed_hash and not fork_block and supported:
@@ -352,6 +366,9 @@ def _build_backfill_row(
         "anchor_discovery_url": anchor_discovery_url,
         "anchor_discovery_seed_transaction_hash": anchor_discovery_hash,
         "anchor_discovery_block": anchor_discovery_block,
+        "anchor_discovery_attempt_count": str(anchor_discovery_attempt_count),
+        "anchor_discovery_timeout_count": str(anchor_discovery_timeout_count),
+        "anchor_discovery_result_statuses": anchor_discovery_result_statuses,
         "rpc_backfill_status": rpc_backfill_status,
         "reference_url": row["reference_url"],
         "security_report_sources": row["security_report_sources"],
@@ -390,6 +407,18 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
         "anchor_discovered_count": sum(
             1 for row in backfill_rows if row.get("anchor_discovery_status") == "discovered"
         ),
+        "anchor_discovery_attempted_count": sum(
+            1 for row in backfill_rows if parse_int(row.get("anchor_discovery_attempt_count")) or 0
+        ),
+        "anchor_discovery_result_count": sum(
+            parse_int(row.get("anchor_discovery_attempt_count")) or 0 for row in backfill_rows
+        ),
+        "anchor_discovery_timeout_result_count": sum(
+            parse_int(row.get("anchor_discovery_timeout_count")) or 0 for row in backfill_rows
+        ),
+        "anchor_discovery_exhausted_count": sum(
+            1 for row in backfill_rows if str(row.get("anchor_discovery_status") or "").startswith("anchor_discovery_search_exhausted")
+        ),
         "onchain_anchor_complete_count": sum(
             1 for row in backfill_rows if row.get("seed_transaction_hash") and row.get("fork_block")
         ),
@@ -399,6 +428,20 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
             if row["security_anchor"] != "true" and not row.get("seed_transaction_hash") and not extract_seed_transaction_hash(row)
         ),
     }
+
+
+def _evidence_quality_errors(backfill_summary: dict[str, int]) -> list[str]:
+    errors: list[str] = []
+    attempted = backfill_summary.get("anchor_discovery_attempted_count", 0)
+    discovered = backfill_summary.get("anchor_discovered_count", 0)
+    complete = backfill_summary.get("onchain_anchor_complete_count", 0)
+    timeouts = backfill_summary.get("anchor_discovery_timeout_result_count", 0)
+    results = backfill_summary.get("anchor_discovery_result_count", 0)
+    if attempted and discovered == 0 and complete == 0:
+        errors.append("anchor_discovery_attempted_without_onchain_anchor")
+    if attempted and results and timeouts == results:
+        errors.append("anchor_discovery_all_attempts_timed_out")
+    return errors
 
 
 def _prioritized_reference_fetch_ids(
@@ -596,8 +639,10 @@ def _discover_onchain_anchor(
         return _empty_anchor_discovery(f"anchor_discovery_failed:{exc.__class__.__name__}")
 
     last_status = "anchor_discovery_no_results"
+    result_statuses: list[str] = []
     for result in results:
         status = str(result.get("status") or "fetched")
+        result_statuses.append(status)
         if status != "fetched":
             last_status = status
             continue
@@ -613,18 +658,41 @@ def _discover_onchain_anchor(
                 "anchor_discovery_url": evidence_url,
                 "anchor_discovery_seed_transaction_hash": seed_hash,
                 "anchor_discovery_block": "" if block is None else str(block),
+                **_anchor_discovery_attempt_metadata(result_statuses),
             }
         last_status = "anchor_discovery_no_onchain_anchor"
-    return _empty_anchor_discovery(last_status)
+    return _empty_anchor_discovery(
+        _anchor_discovery_exhausted_status(last_status, result_statuses),
+        result_statuses=result_statuses,
+    )
 
 
-def _empty_anchor_discovery(status: str) -> dict[str, str]:
+def _empty_anchor_discovery(status: str, *, result_statuses: list[str] | None = None) -> dict[str, str]:
     return {
         "anchor_discovery_status": status,
         "anchor_discovery_url": "",
         "anchor_discovery_seed_transaction_hash": "",
         "anchor_discovery_block": "",
+        **_anchor_discovery_attempt_metadata(result_statuses or []),
     }
+
+
+def _anchor_discovery_exhausted_status(last_status: str, result_statuses: list[str]) -> str:
+    if result_statuses and _anchor_discovery_timeout_count(result_statuses) == len(result_statuses):
+        return "anchor_discovery_search_exhausted:all_timeouts"
+    return last_status
+
+
+def _anchor_discovery_attempt_metadata(result_statuses: list[str]) -> dict[str, str]:
+    return {
+        "anchor_discovery_attempt_count": str(len(result_statuses)),
+        "anchor_discovery_timeout_count": str(_anchor_discovery_timeout_count(result_statuses)),
+        "anchor_discovery_result_statuses": "|".join(_dedupe_strings(result_statuses)),
+    }
+
+
+def _anchor_discovery_timeout_count(result_statuses: list[str]) -> int:
+    return sum(1 for status in result_statuses if "TimeoutError" in status)
 
 
 def _anchor_discovery_context(row: dict[str, str], incident_context: dict[str, str]) -> dict[str, str]:
