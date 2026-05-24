@@ -24,6 +24,8 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "source_url",
         "source_page",
         "category_filter",
+        "seed_transaction_hash",
+        "fork_block",
         "description",
         "normalized_at",
     ]
@@ -393,6 +395,40 @@ def test_replay_cohort_does_not_treat_candidate_feed_as_security_evidence(tmp_pa
     assert entry["security_report_sources"] == []
 
 
+def test_replay_cohort_requires_security_source_url_not_only_description_mentions(tmp_path):
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Mention Only Candidate",
+                reference_url="https://decrypt.co/incident-with-security-company-mention",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                description="Decrypt summarized a DeFi exploit and mentioned BlockSec and PeckShield in passing.",
+            )
+        ],
+    )
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=1,
+        max_cases=1,
+        evm_only=True,
+        require_seed_transaction_hash=False,
+        require_replay_block=False,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["case_count"] == 0
+    exclusion_log = json.loads((tmp_path / "cohort" / "exclusion_log.json").read_text(encoding="utf-8"))
+    entry = exclusion_log["entries"][0]
+    assert entry["reason"] == "missing_security_anchor"
+    assert entry["security_report_sources"] == []
+
+
 def test_replay_cohort_uses_replay_results_only_as_fixture_metadata(tmp_path):
     incidents_csv = tmp_path / "incidents.csv"
     replay_results_csv = tmp_path / "replay_results.csv"
@@ -624,3 +660,49 @@ def test_replay_cohort_cli_round_trip(tmp_path):
     assert (out / "exclusion_log.json").exists()
     assert (out / "stage_ledger.json").exists()
     assert len(list((out / "cases").glob("*.json"))) == 10
+
+
+def test_replay_cohort_cli_accepts_explicit_no_backfill_switch(tmp_path):
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Strict Complete Candidate",
+                seed_transaction_hash="0x" + "1" * 64,
+                fork_block=17_000_000,
+            )
+        ],
+    )
+    out = tmp_path / "cohort"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "abra",
+            "replay",
+            "cohort",
+            "--incidents-csv",
+            str(incidents_csv),
+            "--out",
+            str(out),
+            "--min-cases",
+            "1",
+            "--max-cases",
+            "1",
+            "--no-security-anchor-backfill",
+            "--rpc-supported-chain",
+            "ethereum",
+            "--json",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "passed"
+    assert payload["case_count"] == 1

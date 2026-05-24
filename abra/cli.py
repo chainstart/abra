@@ -143,9 +143,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicitly allow a chain for replay evidence enrichment. Repeatable.",
     )
     replay_cohort.add_argument(
+        "--no-security-anchor-backfill",
+        action="store_true",
+        help="Disable security-anchor backfill cases and keep only security-anchored incidents that already have tx hash and replay block.",
+    )
+    replay_cohort.add_argument(
         "--no-evidence-candidates",
         action="store_true",
-        help="Disable security-anchor backfill candidates and keep only security-anchored incidents that already have tx hash and replay block.",
+        help=argparse.SUPPRESS,
     )
     replay_cohort.add_argument(
         "--allow-missing-seed-transaction-hash",
@@ -263,7 +268,7 @@ def _handle_replay(args: argparse.Namespace) -> int:
             refresh_top_protocols=args.refresh_top_protocols,
             require_seed_transaction_hash=not args.allow_missing_seed_transaction_hash,
             require_replay_block=not args.allow_missing_replay_block,
-            include_evidence_candidates=not args.no_evidence_candidates,
+            include_evidence_candidates=not (args.no_security_anchor_backfill or args.no_evidence_candidates),
             rpc_provider=args.rpc_provider,
             rpc_supported_chains=args.rpc_supported_chains,
         )

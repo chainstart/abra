@@ -13,6 +13,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from abra.manifest import repo_root
 
@@ -605,11 +606,16 @@ def _security_report_sources(row: dict[str, str], card: dict[str, str]) -> list[
         str(card.get("reference_url") or "").strip(),
     ]
     usable_reference_urls = [url for url in reference_urls if _is_security_reference_url(url)]
-    text = " ".join([*usable_reference_urls, str(row.get("description") or "")]).lower()
     sources: list[dict[str, str]] = []
-    for name, markers in SECURITY_REPORT_SOURCES.items():
-        if any(marker in text for marker in markers):
-            sources.append({"source": name, "url": _security_source_url(usable_reference_urls)})
+    seen: set[tuple[str, str]] = set()
+    for url in usable_reference_urls:
+        host = _url_host(url)
+        for name, markers in SECURITY_REPORT_SOURCES.items():
+            if any(_marker_matches_host(marker, host) for marker in markers):
+                key = (name, url)
+                if key not in seen:
+                    sources.append({"source": name, "url": url})
+                    seen.add(key)
     return sources
 
 
@@ -629,8 +635,17 @@ def _is_security_reference_url(url: str) -> bool:
     return True
 
 
-def _security_source_url(urls: list[str]) -> str:
-    return next((url for url in urls if url), "")
+def _url_host(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    return host.lower().removeprefix("www.")
+
+
+def _marker_matches_host(marker: str, host: str) -> bool:
+    marker_text = marker.lower().removeprefix("www.")
+    if "." in marker_text:
+        return host == marker_text or host.endswith(f".{marker_text}")
+    return host == marker_text or host.startswith(f"{marker_text}.")
 
 
 def _extract_seed_transaction_hash(
