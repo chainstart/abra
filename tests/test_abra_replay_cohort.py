@@ -219,6 +219,39 @@ def test_replay_cohort_fails_when_strict_seed_hash_requirement_is_not_met(tmp_pa
     assert {entry["reason"] for entry in exclusion_log["entries"]} == {"missing_seed_transaction_hash"}
 
 
+def test_replay_cohort_fails_when_selected_evidence_candidates_still_lack_onchain_anchors(tmp_path):
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(incidents_csv, [_incident(index) for index in range(1, 13)])
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=10,
+        max_cases=12,
+        evm_only=True,
+        require_seed_transaction_hash=True,
+        require_replay_block=True,
+        include_evidence_candidates=True,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["case_count"] == 12
+    assert payload["quality"]["missing_seed_transaction_hash_count"] == 12
+    assert payload["quality"]["missing_replay_block_count"] == 12
+    assert "selected_cases_missing_seed_transaction_hash" in payload["errors"]
+    assert "selected_cases_missing_replay_block" in payload["errors"]
+    assert "selected_cases_include_diagnostic_evidence_boundaries" in payload["warnings"]
+
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["case_count"] == 12
+    assert {case["eligibility"] for case in manifest["cases"]} == {"security_anchor_backfill_required"}
+    assert all(
+        case["pipeline_stages"]["alchemy_onchain_backfill"]["status"] == "required"
+        for case in manifest["cases"]
+    )
+
+
 def test_replay_cohort_reports_missing_alchemy_configuration(tmp_path, monkeypatch):
     monkeypatch.setenv("ABRA_DISABLE_LOCAL_ENV", "1")
     for key in (

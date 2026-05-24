@@ -174,6 +174,13 @@ def build_replay_cohort(
         errors.append(rpc_state["missing_configuration_error"])
     if len(selected) < min_cases:
         errors.append("insufficient_eligible_cases")
+    errors.extend(
+        _selected_strict_requirement_errors(
+            selected,
+            require_seed_transaction_hash=require_seed_transaction_hash,
+            require_replay_block=require_replay_block,
+        )
+    )
 
     _reset_out_dir(out_path)
     cases_dir = out_path / "cases"
@@ -687,6 +694,20 @@ def _cohort_warnings(selected: list[dict[str, Any]], rpc_state: dict[str, Any]) 
     if any(not case["seed_transaction_hash"] or not case["fork_block"] for case in selected):
         warnings.append("selected_cases_include_diagnostic_evidence_boundaries")
     return warnings
+
+
+def _selected_strict_requirement_errors(
+    selected: list[dict[str, Any]],
+    *,
+    require_seed_transaction_hash: bool,
+    require_replay_block: bool,
+) -> list[str]:
+    errors: list[str] = []
+    if require_seed_transaction_hash and any(not case["seed_transaction_hash"] for case in selected):
+        errors.append("selected_cases_missing_seed_transaction_hash")
+    if require_replay_block and any(not case["fork_block"] for case in selected):
+        errors.append("selected_cases_missing_replay_block")
+    return errors
 
 
 def _stage_ledger_payload(
