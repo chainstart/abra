@@ -89,6 +89,7 @@ def build_replay_cohort(
     rpc_provider: str = "alchemy",
     rpc_supported_chains: list[str] | None = None,
     source_fetcher: Callable[[str], dict[str, str]] | None = None,
+    anchor_searcher: Callable[[dict[str, str]], list[dict[str, str]]] | None = None,
     rpc_caller: Callable[[str, str, list[str]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Materialize a bounded replay cohort and explicit exclusion log.
@@ -115,6 +116,7 @@ def build_replay_cohort(
         rpc_provider=rpc_provider,
         rpc_supported_chains=rpc_supported_chains,
         source_fetcher=source_fetcher,
+        anchor_searcher=anchor_searcher,
         rpc_caller=rpc_caller,
     )
     security_evidence_path = incidents_path.parent / SECURITY_EVIDENCE_CSV

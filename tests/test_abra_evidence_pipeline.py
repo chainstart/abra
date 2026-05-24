@@ -7,8 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from abra.chain_support import rpc_url_for_chain
 from abra.evidence_pipeline import produce_evidence_pipeline
+
+
+@pytest.fixture(autouse=True)
+def _disable_live_anchor_discovery_by_default(monkeypatch):
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "0")
 
 
 def _write_incidents_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -173,6 +180,9 @@ def test_evidence_pipeline_materializes_security_enrichment_and_alchemy_backfill
     backfill_json = json.loads((out_dir / "alchemy_onchain_backfill_latest.json").read_text(encoding="utf-8"))
     assert backfill_json["stage"] == "alchemy_onchain_backfill"
     assert backfill_json["rpc_capability"]["provider"] == "alchemy"
+    assert backfill_json["summary"]["backfill_candidate_count"] == 3
+    assert backfill_json["summary"]["security_anchored_backfill_count"] == 2
+    assert backfill_json["summary"]["reference_only_backfill_count"] == 1
     assert backfill_json["summary"]["unanchored_skipped_count"] == 1
 
 
@@ -349,6 +359,7 @@ def test_evidence_pipeline_backfills_tx_hash_and_block_from_security_source_and_
 
     payload = json.loads((out_dir / "alchemy_onchain_backfill_latest.json").read_text(encoding="utf-8"))
     assert payload["summary"]["backfilled_onchain_anchor_count"] == 1
+    assert payload["summary"]["onchain_anchor_complete_count"] == 1
 
 
 def test_evidence_pipeline_backfills_reference_tx_without_security_source_anchor(tmp_path, monkeypatch):
@@ -561,6 +572,169 @@ def test_evidence_pipeline_skips_default_live_fetch_for_social_alert_urls(tmp_pa
     assert rows[0]["source_fetch_status"] == "source_fetch_skipped:social_api_required"
     assert rows[0]["source_evidence_url"] == ""
     assert rows[0]["rpc_backfill_status"] == "not_attempted"
+
+
+def test_evidence_pipeline_discovers_tx_anchor_after_social_alert_fetch_is_skipped(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    tx_hash = "0x" + "d" * 64
+    alert_url = "https://x.com/PeckShieldAlert/status/2035565047133401563"
+    explorer_url = f"https://etherscan.io/tx/{tx_hash}"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Social Alert Needs Onchain Anchor",
+                reference_url=alert_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fake_source_fetcher(url: str) -> dict[str, str]:
+        assert url == alert_url
+        return {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""}
+
+    def fake_anchor_searcher(context: dict[str, str]) -> list[dict[str, str]]:
+        assert context["target"] == "Social Alert Needs Onchain Anchor"
+        return [
+            {
+                "status": "fetched",
+                "query": "Social Alert Needs Onchain Anchor exploit transaction",
+                "url": explorer_url,
+                "text": f"Exploit transaction: {explorer_url}",
+            }
+        ]
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_003)}
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=fake_source_fetcher,
+        anchor_searcher=fake_anchor_searcher,
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["security_anchor"] == "true"
+    assert row["source_fetch_status"] == "source_fetch_skipped:social_api_required"
+    assert row["anchor_discovery_status"] == "discovered"
+    assert row["anchor_discovery_url"] == explorer_url
+    assert row["anchor_discovery_seed_transaction_hash"] == tx_hash
+    assert row["seed_transaction_hash"] == tx_hash
+    assert row["fork_block"] == "20000003"
+    assert row["rpc_backfill_status"] == "receipt_verified"
+    assert row["backfill_status"] == "backfilled_onchain_anchor"
+
+    payload = json.loads((out_dir / "alchemy_onchain_backfill_latest.json").read_text(encoding="utf-8"))
+    assert payload["summary"]["anchor_discovered_count"] == 1
+    assert payload["summary"]["onchain_anchor_complete_count"] == 1
+
+
+def test_evidence_pipeline_uses_alchemy_receipt_before_anchor_discovery_when_seed_tx_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    tx_hash = "0x" + "e" * 64
+    alert_url = "https://x.com/PeckShieldAlert/status/2035565047133401563"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Seed Tx Only Candidate",
+                reference_url=alert_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash=tx_hash,
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fail_if_search_called(context: dict[str, str]) -> list[dict[str, str]]:
+        raise AssertionError(f"anchor discovery should not run when seed tx is enough for RPC: {context}")
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_005)}
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda url: {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""},
+        anchor_searcher=fail_if_search_called,
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["seed_transaction_hash"] == tx_hash
+    assert row["fork_block"] == "20000005"
+    assert row["rpc_backfill_status"] == "receipt_verified"
+    assert row["anchor_discovery_status"] == "not_required"
+
+
+def test_evidence_pipeline_records_explorer_url_from_anchor_search_result_text(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    tx_hash = "0x" + "f" * 64
+    explorer_url = f"https://etherscan.io/tx/{tx_hash}"
+    search_url = "https://duckduckgo.com/html/?q=fixture"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Explorer Url From Search Text",
+                reference_url="https://x.com/PeckShieldAlert/status/2035565047133401563",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fake_anchor_searcher(_context: dict[str, str]) -> list[dict[str, str]]:
+        return [
+            {
+                "status": "fetched",
+                "url": search_url,
+                "text": f'Result link: <a href="{explorer_url}">exploit tx</a>',
+            }
+        ]
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda url: {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""},
+        anchor_searcher=fake_anchor_searcher,
+        rpc_caller=lambda *_args: {"blockNumber": hex(20_000_006)},
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert rows[0]["anchor_discovery_url"] == explorer_url
+    assert rows[0]["anchor_discovery_seed_transaction_hash"] == tx_hash
 
 
 def test_evidence_pipeline_can_disable_live_security_source_fetch(tmp_path, monkeypatch):

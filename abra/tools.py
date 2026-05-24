@@ -43,7 +43,7 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "security_evidence_enrichment",
-        "description": "Materialize URL-anchored security-source evidence for candidate incidents.",
+        "description": "Materialize provenance, security-source, and reference evidence for candidate incidents.",
         "path": "abra/evidence_pipeline.py",
         "command": ["python3", "-m", "abra", "evidence", "produce"],
         "category": "data_pipeline",
@@ -51,7 +51,7 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "alchemy_onchain_backfill",
-        "description": "Record Alchemy chain support and missing tx/fork-block backfill status for security-anchored incidents.",
+        "description": "Discover transaction anchors for candidate incidents and verify fork blocks with Alchemy read-only receipts.",
         "path": "abra/evidence_pipeline.py",
         "command": ["python3", "-m", "abra", "evidence", "produce"],
         "category": "data_pipeline",

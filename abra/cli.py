@@ -146,7 +146,7 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_cohort.add_argument(
         "--no-security-anchor-backfill",
         action="store_true",
-        help="Disable security-anchor backfill cases and keep only security-anchored incidents that already have tx hash and replay block.",
+        help="Disable incomplete provenance-only backfill cases and keep only incidents that already have tx hash and replay block.",
     )
     replay_cohort.add_argument(
         "--no-evidence-candidates",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import html
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 from abra.chain_support import (
     chain_id,
@@ -82,6 +83,10 @@ ALCHEMY_BACKFILL_FIELDS = [
     "source_evidence_url",
     "source_extracted_seed_transaction_hash",
     "source_extracted_block",
+    "anchor_discovery_status",
+    "anchor_discovery_url",
+    "anchor_discovery_seed_transaction_hash",
+    "anchor_discovery_block",
     "rpc_backfill_status",
     "reference_url",
     "security_report_sources",
@@ -89,6 +94,7 @@ ALCHEMY_BACKFILL_FIELDS = [
 
 SourceFetcher = Callable[[str], dict[str, str]]
 RpcCaller = Callable[[str, str, list[str]], dict[str, Any]]
+AnchorSearcher = Callable[[dict[str, str]], list[dict[str, str]]]
 
 
 def produce_evidence_pipeline(
@@ -98,6 +104,7 @@ def produce_evidence_pipeline(
     rpc_provider: str = "alchemy",
     rpc_supported_chains: list[str] | None = None,
     source_fetcher: SourceFetcher | None = None,
+    anchor_searcher: AnchorSearcher | None = None,
     rpc_caller: RpcCaller | None = None,
 ) -> dict[str, Any]:
     """Write explicit candidate enrichment and Alchemy backfill stage products."""
@@ -115,6 +122,7 @@ def produce_evidence_pipeline(
 
     enriched_rows = [_enrich_security_evidence(row) for row in incident_rows]
     reference_fetch_budget = _reference_fetch_budget()
+    anchor_discovery_budget = _onchain_anchor_discovery_budget()
     backfill_rows = [
         _build_backfill_row(
             row,
@@ -122,8 +130,12 @@ def produce_evidence_pipeline(
             rpc_supported_chains=rpc_chains,
             incident_context=row,
             source_fetcher=source_fetcher or fetch_security_source_text,
+            anchor_searcher=anchor_searcher or search_onchain_anchor_sources,
             rpc_caller=rpc_caller or json_rpc_call,
             allow_reference_fetch=row["security_anchor"] == "true" or index < reference_fetch_budget,
+            allow_anchor_discovery=_onchain_anchor_discovery_enabled()
+            and index < anchor_discovery_budget
+            and (not row["seed_transaction_hash"] or not row["fork_block"]),
         )
         for index, row in enumerate(enriched_rows)
         if row["reference_url"] or row["seed_transaction_hash"] or extract_seed_transaction_hash(row)
@@ -231,8 +243,10 @@ def _build_backfill_row(
     rpc_supported_chains: set[str],
     incident_context: dict[str, str],
     source_fetcher: SourceFetcher,
+    anchor_searcher: AnchorSearcher,
     rpc_caller: RpcCaller,
     allow_reference_fetch: bool,
+    allow_anchor_discovery: bool,
 ) -> dict[str, str]:
     chain = normalize_chain(row.get("chain") or "")
     seed_hash = row.get("seed_transaction_hash") or extract_seed_transaction_hash(row) or ""
@@ -242,6 +256,10 @@ def _build_backfill_row(
     source_fetch_status = "not_required" if seed_hash and fork_block else "not_attempted"
     source_extracted_hash = ""
     source_extracted_block = ""
+    anchor_discovery_status = "not_required" if seed_hash and fork_block else "not_attempted"
+    anchor_discovery_url = ""
+    anchor_discovery_hash = ""
+    anchor_discovery_block = ""
     if (not seed_hash or not fork_block) and evidence_sources:
         source_evidence = _extract_onchain_anchor_from_security_sources(
             evidence_sources,
@@ -262,6 +280,29 @@ def _build_backfill_row(
         rpc_result = _fetch_fork_block_from_rpc(chain, seed_hash, rpc_caller)
         rpc_backfill_status = rpc_result["rpc_backfill_status"]
         fork_block = rpc_result["fork_block"] or fork_block
+
+    if seed_hash and fork_block and anchor_discovery_status == "not_attempted":
+        anchor_discovery_status = "not_required"
+
+    if (not seed_hash) or (seed_hash and not fork_block):
+        if allow_anchor_discovery:
+            discovered = _discover_onchain_anchor(
+                row,
+                incident_context=incident_context,
+                anchor_searcher=anchor_searcher,
+            )
+            anchor_discovery_status = discovered["anchor_discovery_status"]
+            anchor_discovery_url = discovered["anchor_discovery_url"]
+            anchor_discovery_hash = discovered["anchor_discovery_seed_transaction_hash"]
+            anchor_discovery_block = discovered["anchor_discovery_block"]
+            seed_hash = seed_hash or anchor_discovery_hash
+            fork_block = fork_block or anchor_discovery_block
+            if seed_hash and not fork_block and supported:
+                rpc_result = _fetch_fork_block_from_rpc(chain, seed_hash, rpc_caller)
+                rpc_backfill_status = rpc_result["rpc_backfill_status"]
+                fork_block = rpc_result["fork_block"] or fork_block
+        else:
+            anchor_discovery_status = "anchor_discovery_skipped:disabled_or_budget"
 
     missing = [
         field
@@ -296,6 +337,10 @@ def _build_backfill_row(
         "source_evidence_url": source_evidence_url,
         "source_extracted_seed_transaction_hash": source_extracted_hash,
         "source_extracted_block": source_extracted_block,
+        "anchor_discovery_status": anchor_discovery_status,
+        "anchor_discovery_url": anchor_discovery_url,
+        "anchor_discovery_seed_transaction_hash": anchor_discovery_hash,
+        "anchor_discovery_block": anchor_discovery_block,
         "rpc_backfill_status": rpc_backfill_status,
         "reference_url": row["reference_url"],
         "security_report_sources": row["security_report_sources"],
@@ -316,7 +361,11 @@ def _security_summary(enriched_rows: list[dict[str, str]], original_rows: list[d
 
 def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[dict[str, str]]) -> dict[str, int]:
     return {
-        "security_anchored_count": len(backfill_rows),
+        "backfill_candidate_count": len(backfill_rows),
+        "security_anchored_backfill_count": sum(1 for row in backfill_rows if row["security_anchor"] == "true"),
+        "reference_only_backfill_count": sum(1 for row in backfill_rows if row["security_anchor"] != "true"),
+        # Backward-compatible alias kept for existing consumers.
+        "security_anchored_count": sum(1 for row in backfill_rows if row["security_anchor"] == "true"),
         "not_required_count": sum(1 for row in backfill_rows if row["backfill_status"] == "not_required"),
         "backfilled_onchain_anchor_count": sum(
             1 for row in backfill_rows if row["backfill_status"] == "backfilled_onchain_anchor"
@@ -326,6 +375,12 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
         ),
         "blocked_rpc_unsupported_count": sum(
             1 for row in backfill_rows if row["backfill_status"] == "blocked_rpc_unsupported"
+        ),
+        "anchor_discovered_count": sum(
+            1 for row in backfill_rows if row.get("anchor_discovery_status") == "discovered"
+        ),
+        "onchain_anchor_complete_count": sum(
+            1 for row in backfill_rows if row.get("seed_transaction_hash") and row.get("fork_block")
         ),
         "unanchored_skipped_count": sum(
             1
@@ -398,6 +453,57 @@ def _extract_onchain_anchor_from_security_sources(
     }
 
 
+def _discover_onchain_anchor(
+    row: dict[str, str],
+    *,
+    incident_context: dict[str, str],
+    anchor_searcher: AnchorSearcher,
+) -> dict[str, str]:
+    try:
+        results = anchor_searcher(_anchor_discovery_context(row, incident_context))
+    except Exception as exc:  # pragma: no cover - defensive boundary for live search failures
+        return _empty_anchor_discovery(f"anchor_discovery_failed:{exc.__class__.__name__}")
+
+    last_status = "anchor_discovery_no_results"
+    for result in results:
+        status = str(result.get("status") or "fetched")
+        if status != "fetched":
+            last_status = status
+            continue
+        url = str(result.get("url") or "")
+        text = " ".join([url, str(result.get("text") or "")])
+        evidence_text = select_incident_context_text(text, incident_context)
+        seed_hash = extract_seed_transaction_hash({"url": url, "source_text": evidence_text}) or ""
+        block = extract_block_number(evidence_text)
+        if seed_hash or block:
+            evidence_url = extract_transaction_url(evidence_text, seed_hash) or url
+            return {
+                "anchor_discovery_status": "discovered",
+                "anchor_discovery_url": evidence_url,
+                "anchor_discovery_seed_transaction_hash": seed_hash,
+                "anchor_discovery_block": "" if block is None else str(block),
+            }
+        last_status = "anchor_discovery_no_onchain_anchor"
+    return _empty_anchor_discovery(last_status)
+
+
+def _empty_anchor_discovery(status: str) -> dict[str, str]:
+    return {
+        "anchor_discovery_status": status,
+        "anchor_discovery_url": "",
+        "anchor_discovery_seed_transaction_hash": "",
+        "anchor_discovery_block": "",
+    }
+
+
+def _anchor_discovery_context(row: dict[str, str], incident_context: dict[str, str]) -> dict[str, str]:
+    context = {str(key): str(value) for key, value in {**incident_context, **row}.items()}
+    context["target"] = context.get("target") or context.get("incident") or ""
+    context["slug"] = context.get("slug") or slugify(context["target"] or "incident")
+    context["chain"] = normalize_chain(context.get("chain") or "")
+    return context
+
+
 def select_incident_context_text(text: str, incident_context: dict[str, str]) -> str:
     targets = [
         str(incident_context.get("target") or ""),
@@ -437,6 +543,117 @@ def _reference_fetch_budget() -> int:
         return max(0, int(os.environ.get("ABRA_REFERENCE_FETCH_BUDGET", "20")))
     except ValueError:
         return 20
+
+
+def _onchain_anchor_discovery_enabled() -> bool:
+    value = os.environ.get("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1").strip().lower()
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _onchain_anchor_discovery_budget() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_ONCHAIN_ANCHOR_DISCOVERY_BUDGET", "20")))
+    except ValueError:
+        return 20
+
+
+def search_onchain_anchor_sources(context: dict[str, str]) -> list[dict[str, str]]:
+    """Search public web result pages for transaction/explorer anchors.
+
+    This is a bounded best-effort discovery step. It never creates incidents;
+    it only attempts to add tx/block anchors to an already selected candidate.
+    """
+
+    if not _onchain_anchor_discovery_enabled():
+        return [{"status": "anchor_discovery_skipped:disabled", "url": "", "text": ""}]
+
+    results: list[dict[str, str]] = []
+    for query in _onchain_anchor_queries(context):
+        url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "ABRA/1.0 onchain-anchor-discovery (+https://github.com/chainstart/abra)",
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                raw = response.read(1_000_000)
+        except urllib.error.HTTPError as exc:
+            results.append({"status": f"http_{exc.code}", "query": query, "url": url, "text": ""})
+            continue
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", "")
+            reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+            results.append(
+                {"status": f"anchor_discovery_failed:{reason_name}", "query": query, "url": url, "text": ""}
+            )
+            continue
+        text = html.unescape(raw.decode("utf-8", errors="replace"))
+        results.append({"status": "fetched", "query": query, "url": url, "text": text})
+        if extract_seed_transaction_hash({"source_text": text}):
+            break
+    return results
+
+
+def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:
+    target = str(context.get("target") or context.get("incident") or "").strip()
+    slug = str(context.get("slug") or "").replace("-", " ").strip()
+    chain = normalize_chain(str(context.get("chain") or ""))
+    date = str(context.get("event_date") or "").strip()
+    names = [name for name in (target, slug) if name]
+    if not names:
+        names = ["DeFi exploit"]
+    base = names[0]
+    explorer = _explorer_domain_for_chain(chain)
+    suffix = f" {date}" if date else ""
+    queries = [
+        f"{base}{suffix} exploit transaction hash",
+        f"{base}{suffix} attack tx hash",
+        f"{base}{suffix} {explorer} tx",
+        f"{base}{suffix} BlockSec PeckShield CertiK exploit transaction",
+    ]
+    return _dedupe_strings(queries)
+
+
+def _explorer_domain_for_chain(chain: str) -> str:
+    return {
+        "ethereum": "etherscan.io",
+        "bsc": "bscscan.com",
+        "bnb": "bscscan.com",
+        "polygon": "polygonscan.com",
+        "arbitrum": "arbiscan.io",
+        "optimism": "optimistic.etherscan.io",
+        "base": "basescan.org",
+        "avalanche": "snowtrace.io",
+        "celo": "celoscan.io",
+        "zksync": "era.zksync.network",
+        "polygon_zkevm": "zkevm.polygonscan.com",
+    }.get(normalize_chain(chain), "etherscan.io")
+
+
+def extract_transaction_url(text: str, tx_hash: str = "") -> str:
+    tx_pattern = tx_hash if is_tx_hash(tx_hash) else r"0x[a-fA-F0-9]{64}"
+    pattern = rf"https?://[^\s\"'<>)]*/tx/{tx_pattern}"
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if match:
+        return match.group(0).rstrip(".,;")
+    return ""
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = " ".join(value.split())
+        key = normalized.lower()
+        if normalized and key not in seen:
+            seen.add(key)
+            deduped.append(normalized)
+    return deduped
 
 
 def fetch_security_source_text(url: str) -> dict[str, str]:

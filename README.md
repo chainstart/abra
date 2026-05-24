@@ -167,14 +167,17 @@ Use `abra replay cohort` before replay assessment when ARA asks ABRA to produce 
 evidence. The cohort builder first consumes public incident candidates from SlowMist Hacked and
 DefiLlama hacks/losses, then materializes a four-stage evidence boundary:
 `candidate_discovery`, `security_evidence_enrichment`, `alchemy_onchain_backfill`, and
-`replay_cohort_selection`. Security enrichment requires URL-host anchored reports such as CertiK,
-BlockSec, PeckShield, SlowMist incident pages, Rekt, Immunefi, Beosin, ChainSecurity, or OpenZeppelin;
-text-only mentions of security firms do not count. Alchemy backfill runs only after a security
-anchor exists and records missing tx hash / fork block / chain support status; it does not invent
-new candidates. Local event cards and `replay_results.csv` only attach fixture metadata to
-already-qualified incidents; they never create new candidates on their own. Missing transaction
-hashes or fork blocks remain visible as diagnostic evidence boundaries instead of being silently
-treated as replay-ready cases.
+`replay_cohort_selection`. Security enrichment records URL-host anchored reports such as CertiK,
+BlockSec, PeckShield, SlowMist incident pages, Rekt, Immunefi, Beosin, ChainSecurity, OpenZeppelin,
+or official security-alert social accounts; text-only mentions of security firms do not count.
+Social alerts and ordinary references are treated as provenance and search leads, not as blockers:
+if a source cannot be fetched directly, ABRA may use bounded on-chain-anchor discovery to find
+explorer/transaction references for the same candidate and then verify the fork block through
+Alchemy read-only receipts. The pipeline never invents new candidates from RPC/search results.
+Local event cards and `replay_results.csv` only attach fixture metadata to already-qualified
+incidents; they never create new candidates on their own. Missing transaction hashes or fork blocks
+remain visible as diagnostic evidence boundaries instead of being silently treated as replay-ready
+cases.
 
 ```bash
 ALCHEMY_API_KEY=... \

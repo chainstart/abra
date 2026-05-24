@@ -6,7 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from abra.replay_cohort import build_replay_cohort
+
+
+@pytest.fixture(autouse=True)
+def _disable_live_anchor_discovery_by_default(monkeypatch):
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "0")
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -402,6 +409,67 @@ def test_replay_cohort_accepts_complete_onchain_evidence_without_security_anchor
     assert case["fork_block"] == 20_000_001
     assert case["eligibility"] == "onchain_anchor_ready"
     assert case["pipeline_stages"]["security_evidence_enrichment"]["status"] == "reference_only"
+    assert case["pipeline_stages"]["alchemy_onchain_backfill"]["status"] == "verified"
+
+
+def test_replay_cohort_accepts_social_alert_after_abra_discovers_onchain_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    tx_hash = "0x" + "c" * 64
+    explorer_url = f"https://etherscan.io/tx/{tx_hash}"
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Social Alert Cohort Candidate",
+                reference_url="https://x.com/PeckShieldAlert/status/2035565047133401563",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+                description="Ethereum exploit first referenced by an official security alert.",
+            )
+        ],
+    )
+
+    def fake_anchor_searcher(context: dict[str, str]) -> list[dict[str, str]]:
+        assert context["target"] == "Social Alert Cohort Candidate"
+        return [
+            {
+                "status": "fetched",
+                "url": explorer_url,
+                "text": f"Exploit transaction: {explorer_url}",
+            }
+        ]
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_004)}
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=1,
+        max_cases=1,
+        evm_only=True,
+        require_seed_transaction_hash=True,
+        require_replay_block=True,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda url: {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""},
+        anchor_searcher=fake_anchor_searcher,
+        rpc_caller=fake_rpc_caller,
+    )
+
+    assert payload["status"] == "passed"
+    assert payload["case_count"] == 1
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    case = manifest["cases"][0]
+    assert case["security_anchor"] is True
+    assert case["seed_transaction_hash"] == tx_hash
+    assert case["fork_block"] == 20_000_004
+    assert case["eligibility"] == "security_anchor_ready"
     assert case["pipeline_stages"]["alchemy_onchain_backfill"]["status"] == "verified"
 
 
