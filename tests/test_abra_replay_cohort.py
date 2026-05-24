@@ -35,6 +35,59 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
             writer.writerow({field: row.get(field, "") for field in fieldnames})
 
 
+def _write_replay_results_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "incident",
+        "slug",
+        "chain",
+        "rpc_env",
+        "attack_family",
+        "loss_usd",
+        "fork_block",
+        "test_path",
+        "replay_test",
+        "metadata_test",
+        "status",
+        "metadata_status",
+        "command",
+        "returncode",
+        "duration_seconds",
+        "log_path",
+        "blocker",
+        "verified",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def _write_event_card(path: Path, *, slug: str, incident: str, reference_url: str, fork_block: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"""# Incident Card - {incident}
+
+## Metadata
+
+- Incident ID: `{slug}`
+- Date: `2025-01-01`
+- DeFi Label: `true`
+- Attack Family: `oracle_manipulation`
+- Attack Method (raw): `Oracle Manipulation`
+- Estimated Loss: `$1000000`
+- Reference URL: {reference_url}
+
+## Replay Plan
+
+1. Required On-chain Preconditions: Ethereum fork near block `{fork_block}`.
+2. Fork Block Number: `{fork_block}`
+""",
+        encoding="utf-8",
+    )
+
+
 def _incident(index: int, **overrides: object) -> dict[str, object]:
     target = str(overrides.get("target") or f"Fixture Protocol {index}")
     slug = target.lower().replace(" ", "-")
@@ -79,6 +132,7 @@ def test_replay_cohort_builds_manifest_exclusion_log_and_case_files(tmp_path):
         evm_only=True,
         require_seed_transaction_hash=False,
         require_replay_block=False,
+        rpc_supported_chains=["ethereum"],
     )
 
     assert payload["schema_version"] == "abra.replay_cohort.v1"
@@ -120,6 +174,8 @@ def test_replay_cohort_fails_when_strict_seed_hash_requirement_is_not_met(tmp_pa
         evm_only=True,
         require_seed_transaction_hash=True,
         require_replay_block=False,
+        include_evidence_candidates=False,
+        rpc_supported_chains=["ethereum"],
     )
 
     assert payload["status"] == "failed"
@@ -128,6 +184,216 @@ def test_replay_cohort_fails_when_strict_seed_hash_requirement_is_not_met(tmp_pa
     assert "insufficient_eligible_cases" in payload["errors"]
     exclusion_log = json.loads((tmp_path / "cohort" / "exclusion_log.json").read_text(encoding="utf-8"))
     assert {entry["reason"] for entry in exclusion_log["entries"]} == {"missing_seed_transaction_hash"}
+
+
+def test_replay_cohort_reports_missing_alchemy_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABRA_DISABLE_LOCAL_ENV", "1")
+    for key in (
+        "ALCHEMY_API_KEY",
+        "ALCHEMY_RPC_URL",
+        "ALCHEMY_MAINNET_RPC_URL",
+        "ALCHEMY_HTTP_URL",
+        "ETH_RPC_URL",
+        "POLYGON_RPC_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(incidents_csv, [_incident(index) for index in range(1, 11)])
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=10,
+        max_cases=10,
+        evm_only=True,
+        require_seed_transaction_hash=False,
+        require_replay_block=False,
+    )
+
+    assert payload["status"] == "failed"
+    assert "alchemy_rpc_not_configured" in payload["errors"]
+    assert "insufficient_eligible_cases" in payload["errors"]
+    assert "alchemy_rpc_not_configured" in payload["warnings"]
+    assert payload["quality"]["selected_rpc_supported_count"] == 0
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["rpc_provider"] == "alchemy"
+    assert manifest["rpc_supported_chains"] == []
+
+
+def test_replay_cohort_uses_alchemy_api_key_as_default_rpc_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.delenv("ETH_RPC_URL", raising=False)
+    monkeypatch.delenv("POLYGON_RPC_URL", raising=False)
+    incidents_csv = tmp_path / "incidents.csv"
+    rows = [_incident(index) for index in range(1, 10)]
+    rows.append(
+        _incident(
+            10,
+            target="Polygon Candidate",
+            description="Polygon DeFi oracle manipulation candidate.",
+        )
+    )
+    rows.append(
+        _incident(
+            11,
+            target="EOS Candidate",
+            description="EOS DeFi contract exploit candidate.",
+        )
+    )
+    _write_csv(incidents_csv, rows)
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=10,
+        max_cases=10,
+        evm_only=True,
+        require_seed_transaction_hash=False,
+        require_replay_block=False,
+    )
+
+    assert payload["status"] == "passed"
+    assert payload["case_count"] == 10
+    assert payload["quality"]["selected_rpc_supported_count"] == 10
+    assert "alchemy_rpc_not_configured" not in payload["errors"]
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    assert "ethereum" in manifest["rpc_supported_chains"]
+    assert "polygon" in manifest["rpc_supported_chains"]
+    assert "eos" not in manifest["rpc_supported_chains"]
+    assert {case["chain"] for case in manifest["cases"]} == {"ethereum", "polygon"}
+    assert all(case["rpc_supported"] is True for case in manifest["cases"])
+
+
+def test_replay_cohort_treats_alchemy_l2s_as_evm_supported(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    incidents_csv = tmp_path / "incidents.csv"
+    rows = [
+        _incident(1, target="Base Candidate", description="Base DeFi exploit candidate."),
+        _incident(2, target="Celo Candidate", description="Celo DeFi exploit candidate."),
+        _incident(3, target="zkSync Candidate", description="zkSync DeFi exploit candidate."),
+        _incident(4, target="Polygon zkEVM Candidate", description="Polygon zkEVM DeFi exploit candidate."),
+    ]
+    _write_csv(incidents_csv, rows)
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=4,
+        max_cases=4,
+        evm_only=True,
+        require_seed_transaction_hash=False,
+        require_replay_block=False,
+    )
+
+    assert payload["status"] == "passed"
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    by_chain = {case["chain"]: case for case in manifest["cases"]}
+    assert by_chain["base"]["chain_id"] == 8453
+    assert by_chain["celo"]["chain_id"] == 42220
+    assert by_chain["zksync"]["chain_id"] == 324
+    assert by_chain["polygon_zkevm"]["chain_id"] == 1101
+    assert all(case["rpc_supported"] is True for case in manifest["cases"])
+
+
+def test_replay_cohort_enriches_public_candidates_and_filters_by_supported_rpc_chain(tmp_path):
+    incidents_csv = tmp_path / "incidents.csv"
+    replay_results_csv = tmp_path / "replay_results.csv"
+    event_cards_dir = tmp_path / "events"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="SlowMist Candidate",
+                reference_url="https://hacked.slowmist.io/incidents/slowmist-candidate",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                description="SlowMist reported an Ethereum oracle manipulation candidate.",
+            ),
+            _incident(
+                2,
+                target="CertiK Candidate",
+                reference_url="https://www.certik.com/resources/blog/certik-candidate-postmortem",
+                source_url="https://www.certik.com/resources/blog/certik-candidate-postmortem",
+                description="CertiK reported an Ethereum flash-loan candidate.",
+            ),
+            _incident(
+                3,
+                target="Unsupported Polygon Candidate",
+                reference_url="https://hacked.slowmist.io/incidents/polygon-candidate",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                description="SlowMist reported a Polygon candidate.",
+            ),
+        ],
+    )
+    _write_replay_results_csv(
+        replay_results_csv,
+        [
+            {
+                "incident": f"Catalog Replay {index}",
+                "slug": f"catalog-replay-{index}",
+                "chain": "ethereum",
+                "rpc_env": "ETH_RPC_URL",
+                "attack_family": "oracle_manipulation",
+                "loss_usd": 1_000_000 + index,
+                "fork_block": 17_000_000 + index,
+                "test_path": f"test/replay/CatalogReplay{index}.t.sol",
+                "replay_test": f"test_CatalogReplay{index}",
+                "metadata_test": f"test_CatalogReplay{index}Metadata",
+                "status": "no_rpc",
+                "metadata_status": "passed",
+                "blocker": "ETH_RPC_URL not configured",
+                "verified": "False",
+            }
+            for index in range(1, 10)
+        ],
+    )
+    for index in range(1, 10):
+        slug = f"catalog-replay-{index}"
+        _write_event_card(
+            event_cards_dir / f"2025-01-01_{slug}_abcdef{index}.md",
+            slug=slug,
+            incident=f"Catalog Replay {index}",
+            reference_url=f"https://hacked.slowmist.io/incidents/{slug}",
+            fork_block=17_000_000 + index,
+        )
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        replay_results_csv=replay_results_csv,
+        event_cards_dir=event_cards_dir,
+        out=tmp_path / "cohort",
+        min_cases=10,
+        max_cases=10,
+        evm_only=True,
+        require_seed_transaction_hash=True,
+        require_replay_block=True,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    assert payload["status"] == "passed"
+    assert payload["case_count"] == 10
+    assert payload["quality"]["selected_replay_metadata_count"] == 9
+    assert payload["quality"]["selected_security_report_count"] >= 1
+    assert payload["quality"]["selected_rpc_supported_count"] == 10
+    assert payload["quality"]["missing_seed_transaction_hash_count"] == 10
+    assert "selected_cases_include_diagnostic_evidence_boundaries" in payload["warnings"]
+
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["case_count"] == 10
+    eligibilities = {case["eligibility"] for case in manifest["cases"]}
+    assert "catalog_replay_assessment" in eligibilities
+    assert "diagnostic_replay_assessment" in eligibilities
+    assert {case["chain"] for case in manifest["cases"]} == {"ethereum"}
+    assert all(case["rpc_supported"] is True for case in manifest["cases"])
+    catalog_case = next(case for case in manifest["cases"] if case["eligibility"] == "catalog_replay_assessment")
+    assert catalog_case["test_path"].startswith("test/replay/CatalogReplay")
+    assert catalog_case["fixture_result"]["status"] == "no_rpc"
+    diagnostic_case = next(case for case in manifest["cases"] if case["eligibility"] == "diagnostic_replay_assessment")
+    assert diagnostic_case["security_report_sources"]
+    assert diagnostic_case["evidence_level_target"] == "L1"
+    exclusion_log = json.loads((tmp_path / "cohort" / "exclusion_log.json").read_text(encoding="utf-8"))
+    excluded = {(entry["slug"], entry["reason"]) for entry in exclusion_log["entries"]}
+    assert ("unsupported-polygon-candidate", "rpc_chain_unsupported") in excluded
 
 
 def test_replay_cohort_cli_round_trip(tmp_path):
@@ -152,6 +418,8 @@ def test_replay_cohort_cli_round_trip(tmp_path):
             "10",
             "--allow-missing-seed-transaction-hash",
             "--allow-missing-replay-block",
+            "--rpc-supported-chain",
+            "ethereum",
             "--json",
         ],
         check=False,

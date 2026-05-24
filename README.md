@@ -141,16 +141,17 @@ forge test --match-path test/replay/EulerFinanceReplay.t.sol
 
 Use the replay runner instead of raw `forge test` when producing paper evidence. It separates
 verified replay from missing RPC, archive-state failures, and missing replay implementations.
+ABRA uses Alchemy as the default RPC capability boundary: configure `ALCHEMY_API_KEY` once and
+ABRA derives chain-specific read-only RPC URLs for supported chains. Keep secrets in `.env.local`
+or the process environment; do not commit RPC keys.
 
 ```bash
-# Public RPC endpoints can test connectivity, but may not serve old archive state.
-ETH_RPC_URL=https://ethereum.publicnode.com \
-POLYGON_RPC_URL=https://polygon-bor-rpc.publicnode.com \
+# Preferred: one Alchemy key is enough for ABRA replay cohorting and Foundry fork replay.
+ALCHEMY_API_KEY=... \
 python3 tools/replay_runner.py --timeout 300 --verbosity=-vv
 
-# Archive-capable endpoints are required for verified historical replay.
+# Explicit per-chain RPC variables remain optional overrides for special archive endpoints.
 ETH_RPC_URL=... python3 tools/replay_runner.py --only lendf-me euler-finance
-POLYGON_RPC_URL=... python3 tools/replay_runner.py --only bonqdao-allianceblock
 ```
 
 Outputs:
@@ -159,6 +160,28 @@ Outputs:
 - `data/processed/replay_results.json`
 - `data/processed/replay_blocker_matrix.csv`
 - `reports/27_replay_verification_results.md`
+
+### Build an Alchemy-Bounded Replay Cohort
+
+Use `abra replay cohort` before replay assessment when ARA asks ABRA to produce blockchain
+evidence. The cohort builder first consumes public incident/security-source candidates, enriches
+them with local ABRA event cards and replay metadata, then filters evidence production to chains
+covered by the configured Alchemy capability. Missing transaction hashes or fork blocks remain
+visible as diagnostic evidence boundaries instead of being silently treated as replay-ready cases.
+
+```bash
+ALCHEMY_API_KEY=... \
+python3 -m abra replay cohort \
+  --refresh \
+  --out runs/abra_evidence/cohort \
+  --min-cases 10 \
+  --max-cases 20 \
+  --evm-only \
+  --json
+```
+
+If neither `ALCHEMY_API_KEY` nor an Alchemy RPC URL is configured, the command fails with
+`alchemy_rpc_not_configured` rather than falling back to unrelated public RPC providers.
 
 ## Audit Framework
 

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 from abra.replay_agent import assess_replay_fixture, validate_evidence_bundle
-from tools.replay_runner import classify_failure
+from tools.replay_runner import ReplayCase, classify_failure, rpc_url_for_case
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "replay_case.json"
@@ -242,3 +243,39 @@ def test_replay_assess_cohort_cli_consumes_cohort_cases(tmp_path):
 
 def test_replay_runner_failure_classifier_is_exposed_for_agent_support():
     assert classify_failure("Error: missing trie node for historical state") == "archive_state_unavailable"
+
+
+def test_replay_runner_derives_chain_rpc_from_alchemy_api_key(monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.delenv("ETH_RPC_URL", raising=False)
+    monkeypatch.delenv("POLYGON_RPC_URL", raising=False)
+
+    ethereum = ReplayCase(
+        incident="Euler Finance",
+        slug="euler-finance",
+        chain="ethereum",
+        rpc_env="ETH_RPC_URL",
+        attack_family="flash_loan",
+        loss_usd=1,
+        fork_block=1,
+        test_path="test/replay/EulerFinanceReplay.t.sol",
+        metadata_test=None,
+        replay_test="test_EulerReplay",
+    )
+    polygon = ReplayCase(
+        incident="BonqDAO",
+        slug="bonqdao",
+        chain="polygon",
+        rpc_env="POLYGON_RPC_URL",
+        attack_family="oracle_manipulation",
+        loss_usd=1,
+        fork_block=1,
+        test_path="test/replay/BonqDAOReplay.t.sol",
+        metadata_test=None,
+        replay_test="test_BonqReplayTx1",
+    )
+
+    assert rpc_url_for_case(ethereum) == "https://eth-mainnet.g.alchemy.com/v2/alchemy-test-key"
+    assert rpc_url_for_case(polygon) == "https://polygon-mainnet.g.alchemy.com/v2/alchemy-test-key"
+    assert "ETH_RPC_URL" not in os.environ
+    assert "POLYGON_RPC_URL" not in os.environ

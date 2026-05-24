@@ -132,6 +132,22 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_cohort.add_argument("--refresh-end-page", type=int, default=8, help="SlowMist refresh end page.")
     replay_cohort.add_argument("--refresh-top-protocols", type=int, default=400, help="DefiLlama protocol refresh cap.")
     replay_cohort.add_argument(
+        "--rpc-provider",
+        default="alchemy",
+        help="RPC capability provider used for chain support filtering. Defaults to Alchemy.",
+    )
+    replay_cohort.add_argument(
+        "--rpc-supported-chain",
+        action="append",
+        dest="rpc_supported_chains",
+        help="Explicitly allow a chain for replay evidence enrichment. Repeatable.",
+    )
+    replay_cohort.add_argument(
+        "--no-evidence-candidates",
+        action="store_true",
+        help="Disable security-report and replay-metadata diagnostic candidates.",
+    )
+    replay_cohort.add_argument(
         "--allow-missing-seed-transaction-hash",
         action="store_true",
         help="Keep cases without seed transaction hashes for diagnostic cohorts.",
@@ -247,6 +263,9 @@ def _handle_replay(args: argparse.Namespace) -> int:
             refresh_top_protocols=args.refresh_top_protocols,
             require_seed_transaction_hash=not args.allow_missing_seed_transaction_hash,
             require_replay_block=not args.allow_missing_replay_block,
+            include_evidence_candidates=not args.no_evidence_candidates,
+            rpc_provider=args.rpc_provider,
+            rpc_supported_chains=args.rpc_supported_chains,
         )
         _emit(payload, args.json)
         return 0 if payload["status"] == "passed" else 1
