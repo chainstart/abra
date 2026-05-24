@@ -20,6 +20,14 @@ from abra.manifest import repo_root
 COHORT_SCHEMA_VERSION = "abra.replay_cohort.v1"
 MANIFEST_SCHEMA_VERSION = "abra.replay_cohort.manifest.v1"
 EXCLUSION_LOG_SCHEMA_VERSION = "abra.replay_cohort.exclusion_log.v1"
+STAGE_LEDGER_SCHEMA_VERSION = "abra.replay_cohort.stage_ledger.v1"
+
+STAGE_ORDER = [
+    "candidate_discovery",
+    "security_evidence_enrichment",
+    "alchemy_onchain_backfill",
+    "replay_cohort_selection",
+]
 
 EVM_CHAIN_IDS = {
     "ethereum": 1,
@@ -179,11 +187,14 @@ def build_replay_cohort(
     rpc_chains = rpc_state["supported_chains"]
 
     generated_at = _utc_now()
+    all_cases: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     exclusions: list[dict[str, Any]] = []
+    exclusion_reasons: dict[str, str] = {}
 
     for row in incidents:
         normalized = _normalize_incident(row, replay_by_slug, cards_by_slug, selected_ids, rpc_chains)
+        all_cases.append(normalized)
         reason = _exclusion_reason(
             normalized,
             evm_only=evm_only,
@@ -193,11 +204,13 @@ def build_replay_cohort(
         )
         if reason:
             exclusions.append(_exclusion_entry(normalized, reason))
+            exclusion_reasons[normalized["incident_id"]] = reason
             continue
         candidates.append(normalized)
 
     candidates.sort(key=_candidate_score, reverse=True)
     selected = candidates[:max_cases]
+    selected_ids_for_stage = {case["incident_id"] for case in selected}
     errors: list[str] = []
     if rpc_state["missing_configuration_error"]:
         errors.append(rpc_state["missing_configuration_error"])
@@ -220,6 +233,7 @@ def build_replay_cohort(
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "cohort_id": _cohort_id(generated_at, selected),
         "generated_at": generated_at,
+        "stage_order": list(STAGE_ORDER),
         "source_incidents_csv": str(incidents_path),
         "selected_incidents_csv": str(selected_path) if selected_path else None,
         "replay_results_csv": str(replay_path) if replay_path.exists() else None,
@@ -256,6 +270,7 @@ def build_replay_cohort(
             "missing_replay_block_count": sum(1 for case in selected if not case["fork_block"]),
             "meets_case_count_requirement": min_cases <= len(manifest_cases) <= max_cases,
         },
+        "stage_ledger": "stage_ledger.json",
     }
     exclusion_log = {
         "schema_version": EXCLUSION_LOG_SCHEMA_VERSION,
@@ -264,9 +279,16 @@ def build_replay_cohort(
         "entries": sorted(exclusions, key=lambda entry: (entry["reason"], entry["slug"])),
         "summary": _exclusion_summary(exclusions),
     }
+    stage_ledger = _stage_ledger_payload(
+        generated_at=generated_at,
+        cases=all_cases,
+        selected_ids=selected_ids_for_stage,
+        exclusion_reasons=exclusion_reasons,
+    )
 
     _write_json(out_path / "manifest.json", manifest)
     _write_json(out_path / "exclusion_log.json", exclusion_log)
+    _write_json(out_path / "stage_ledger.json", stage_ledger)
 
     warnings = _cohort_warnings(selected, rpc_state)
     payload = {
@@ -284,6 +306,7 @@ def build_replay_cohort(
             "manifest": "manifest.json",
             "exclusion_log": "exclusion_log.json",
             "cases_dir": "cases",
+            "stage_ledger": "stage_ledger.json",
         },
         "out": str(out_path),
     }
@@ -424,6 +447,7 @@ def _normalize_incident(
     reference = (row.get("reference_url") or card.get("reference_url") or "").strip()
     security_sources = _security_report_sources(row, card)
     security_anchor = bool(security_sources)
+    candidate_sources = _candidate_discovery_sources(row)
     rpc_env = _rpc_env_for_chain(inferred_chain, replay)
     rpc_supported = _chain_rpc_supported(inferred_chain, rpc_supported_chains)
     fixture_metadata_attached = bool(replay or event_card)
@@ -458,6 +482,7 @@ def _normalize_incident(
         "source_url": row.get("source_url") or "",
         "fixture_source": str(event_card) if event_card else "",
         "event_card": str(event_card) if event_card else "",
+        "candidate_discovery_sources": candidate_sources,
         "security_report_sources": security_sources,
         "security_anchor": security_anchor,
         "rpc_env": rpc_env,
@@ -575,19 +600,37 @@ def _chain_rpc_supported(chain: str, rpc_supported_chains: set[str]) -> bool:
 
 
 def _security_report_sources(row: dict[str, str], card: dict[str, str]) -> list[dict[str, str]]:
-    text = " ".join(
-        [
-            str(row.get("reference_url") or ""),
-            str(row.get("source_url") or ""),
-            str(row.get("description") or ""),
-            str(card.get("reference_url") or ""),
-        ]
-    ).lower()
+    reference_urls = [
+        str(row.get("reference_url") or "").strip(),
+        str(card.get("reference_url") or "").strip(),
+    ]
+    usable_reference_urls = [url for url in reference_urls if _is_security_reference_url(url)]
+    text = " ".join([*usable_reference_urls, str(row.get("description") or "")]).lower()
     sources: list[dict[str, str]] = []
     for name, markers in SECURITY_REPORT_SOURCES.items():
         if any(marker in text for marker in markers):
-            sources.append({"source": name, "url": row.get("reference_url") or card.get("reference_url") or ""})
+            sources.append({"source": name, "url": _security_source_url(usable_reference_urls)})
     return sources
+
+
+def _candidate_discovery_sources(row: dict[str, str]) -> list[dict[str, str]]:
+    source_url = str(row.get("source_url") or "").strip()
+    if "hacked.slowmist.io" in source_url.lower():
+        return [{"source": "slowmist_hacked", "url": source_url, "role": "candidate_discovery"}]
+    return []
+
+
+def _is_security_reference_url(url: str) -> bool:
+    text = url.strip().lower()
+    if not text:
+        return False
+    if "hacked.slowmist.io" in text and ("?c=" in text or "page=" in text):
+        return False
+    return True
+
+
+def _security_source_url(urls: list[str]) -> str:
+    return next((url for url in urls if url), "")
 
 
 def _extract_seed_transaction_hash(
@@ -677,8 +720,10 @@ def _exclusion_entry(case: dict[str, Any], reason: str) -> dict[str, Any]:
         "provenance_url": case["provenance_url"],
         "rpc_env": case.get("rpc_env") or "",
         "rpc_supported": bool(case.get("rpc_supported")),
+        "candidate_discovery_sources": case.get("candidate_discovery_sources") or [],
         "security_anchor": bool(case.get("security_anchor")),
         "security_report_sources": case.get("security_report_sources") or [],
+        "pipeline_stages": _pipeline_stages(case, selection_status="excluded", exclusion_reason=reason),
     }
 
 
@@ -712,6 +757,7 @@ def _case_payload(case: dict[str, Any], generated_at: str) -> dict[str, Any]:
         "provenance_url": case["provenance_url"],
         "fixture_source": case["fixture_source"],
         "event_card": case["event_card"],
+        "candidate_discovery_sources": case["candidate_discovery_sources"],
         "security_report_sources": case["security_report_sources"],
         "security_anchor": case["security_anchor"],
         "rpc_env": case["rpc_env"],
@@ -723,6 +769,7 @@ def _case_payload(case: dict[str, Any], generated_at: str) -> dict[str, Any]:
         "fixture_result": case["fixture_result"],
         "fixture_metadata_attached": case["fixture_metadata_attached"],
         "eligibility": eligibility,
+        "pipeline_stages": _pipeline_stages(case, selection_status="selected"),
         "evidence_level_target": "L4" if case["verified"] else "L1",
         "missing_fields": list(case["missing_fields"]),
         "description": case["description"],
@@ -747,6 +794,121 @@ def _cohort_warnings(selected: list[dict[str, Any]], rpc_state: dict[str, Any]) 
     if any(not case["seed_transaction_hash"] or not case["fork_block"] for case in selected):
         warnings.append("selected_cases_include_diagnostic_evidence_boundaries")
     return warnings
+
+
+def _stage_ledger_payload(
+    *,
+    generated_at: str,
+    cases: list[dict[str, Any]],
+    selected_ids: set[str],
+    exclusion_reasons: dict[str, str],
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    for case in cases:
+        incident_id = case["incident_id"]
+        reason = exclusion_reasons.get(incident_id, "")
+        if incident_id in selected_ids:
+            selection_status = "selected"
+        elif reason:
+            selection_status = "excluded"
+        else:
+            selection_status = "eligible_not_selected"
+        entries.append(
+            {
+                "incident_id": incident_id,
+                "slug": case["slug"],
+                "incident": case["incident"],
+                "chain": case["chain"],
+                "selection_status": selection_status,
+                "exclusion_reason": reason,
+                "candidate_discovery_sources": case.get("candidate_discovery_sources") or [],
+                "security_report_sources": case.get("security_report_sources") or [],
+                "missing_fields": case.get("missing_fields") or [],
+                "pipeline_stages": _pipeline_stages(
+                    case,
+                    selection_status=selection_status,
+                    exclusion_reason=reason or None,
+                ),
+            }
+        )
+    return {
+        "schema_version": STAGE_LEDGER_SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "stage_order": list(STAGE_ORDER),
+        "summary": _stage_ledger_summary(cases, selected_ids, exclusion_reasons),
+        "entries": sorted(entries, key=lambda entry: (entry["selection_status"], entry["slug"])),
+    }
+
+
+def _stage_ledger_summary(
+    cases: list[dict[str, Any]],
+    selected_ids: set[str],
+    exclusion_reasons: dict[str, str],
+) -> dict[str, int]:
+    return {
+        "candidate_discovery_count": sum(1 for case in cases if case.get("candidate_discovery_sources")),
+        "security_evidence_enriched_count": sum(1 for case in cases if case.get("security_anchor")),
+        "alchemy_onchain_backfill_required_count": sum(
+            1
+            for case in cases
+            if case.get("security_anchor") and (not case.get("seed_transaction_hash") or not case.get("fork_block"))
+        ),
+        "replay_metadata_promoted_count": 0,
+        "fixture_metadata_attached_count": sum(1 for case in cases if case.get("fixture_metadata_attached")),
+        "selected_count": len(selected_ids),
+        "excluded_count": len(exclusion_reasons),
+        "eligible_not_selected_count": max(len(cases) - len(selected_ids) - len(exclusion_reasons), 0),
+    }
+
+
+def _pipeline_stages(
+    case: dict[str, Any],
+    *,
+    selection_status: str,
+    exclusion_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "candidate_discovery": {
+            "status": "accepted" if case.get("candidate_discovery_sources") else "unattributed",
+            "sources": case.get("candidate_discovery_sources") or [],
+        },
+        "security_evidence_enrichment": {
+            "status": "verified" if case.get("security_anchor") else "missing",
+            "sources": case.get("security_report_sources") or [],
+        },
+        "alchemy_onchain_backfill": _alchemy_backfill_stage(case),
+        "replay_cohort_selection": {
+            "status": selection_status,
+            "exclusion_reason": exclusion_reason or "",
+            "fixture_metadata_attached": bool(case.get("fixture_metadata_attached")),
+            "replay_metadata_promoted": False,
+        },
+    }
+
+
+def _alchemy_backfill_stage(case: dict[str, Any]) -> dict[str, Any]:
+    missing = [
+        field
+        for field, value in (
+            ("seed_transaction_hash", case.get("seed_transaction_hash")),
+            ("fork_block", case.get("fork_block")),
+        )
+        if not value
+    ]
+    if not case.get("security_anchor"):
+        status = "not_applicable"
+    elif not missing:
+        status = "not_required"
+    elif case.get("rpc_supported"):
+        status = "required"
+    else:
+        status = "blocked_rpc_unsupported"
+    return {
+        "status": status,
+        "provider": "alchemy",
+        "rpc_supported": bool(case.get("rpc_supported")),
+        "missing_fields": missing,
+    }
 
 
 def _reset_out_dir(path: Path) -> None:

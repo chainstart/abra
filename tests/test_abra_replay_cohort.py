@@ -101,7 +101,7 @@ def _incident(index: int, **overrides: object) -> dict[str, object]:
         "attack_family": "oracle_manipulation",
         "loss_usd_raw": "$ 1,000,000",
         "loss_usd": str(1_000_000 + index),
-        "reference_url": f"https://example.test/incidents/{index}",
+        "reference_url": f"https://www.certik.com/resources/blog/fixture-protocol-{index}",
         "source_url": "https://hacked.slowmist.io/?c=&page=1",
         "source_page": "1",
         "category_filter": "all",
@@ -141,20 +141,38 @@ def test_replay_cohort_builds_manifest_exclusion_log_and_case_files(tmp_path):
     assert payload["quality"]["meets_case_count_requirement"] is True
     assert payload["artifacts"]["manifest"] == "manifest.json"
     assert payload["artifacts"]["exclusion_log"] == "exclusion_log.json"
+    assert payload["artifacts"]["stage_ledger"] == "stage_ledger.json"
 
     out = tmp_path / "cohort"
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     exclusion_log = json.loads((out / "exclusion_log.json").read_text(encoding="utf-8"))
+    stage_ledger = json.loads((out / "stage_ledger.json").read_text(encoding="utf-8"))
     case_files = sorted((out / "cases").glob("*.json"))
 
     assert manifest["schema_version"] == "abra.replay_cohort.manifest.v1"
     assert manifest["case_count"] == 12
+    assert manifest["stage_order"] == [
+        "candidate_discovery",
+        "security_evidence_enrichment",
+        "alchemy_onchain_backfill",
+        "replay_cohort_selection",
+    ]
     assert len(manifest["cases"]) == 12
     assert len(case_files) == 12
     assert all(case["chain"] == "ethereum" for case in manifest["cases"])
-    assert all(case["provenance_url"].startswith("https://example.test/") for case in manifest["cases"])
+    assert all(case["provenance_url"].startswith("https://www.certik.com/") for case in manifest["cases"])
     assert all("missing_seed_transaction_hash" in case["missing_fields"] for case in manifest["cases"])
+    assert all(case["pipeline_stages"]["security_evidence_enrichment"]["status"] == "verified" for case in manifest["cases"])
+    assert all(
+        case["pipeline_stages"]["alchemy_onchain_backfill"]["status"] == "required"
+        for case in manifest["cases"]
+    )
     assert all((out / case["case_file"]).exists() for case in manifest["cases"])
+    assert stage_ledger["schema_version"] == "abra.replay_cohort.stage_ledger.v1"
+    assert stage_ledger["stage_order"] == manifest["stage_order"]
+    assert stage_ledger["summary"]["candidate_discovery_count"] == 15
+    assert stage_ledger["summary"]["security_evidence_enriched_count"] == 14
+    assert stage_ledger["summary"]["replay_metadata_promoted_count"] == 0
 
     excluded = {(entry["slug"], entry["reason"]) for entry in exclusion_log["entries"]}
     assert ("centralized-exchange", "not_defi") in excluded
@@ -330,6 +348,51 @@ def test_replay_cohort_requires_security_anchor_before_alchemy_backfill(tmp_path
     assert ("unanchored-ethereum-candidate", "missing_security_anchor") in excluded
 
 
+def test_replay_cohort_does_not_treat_candidate_feed_as_security_evidence(tmp_path):
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="SlowMist Feed Only Candidate",
+                reference_url="https://decrypt.co/358374/oracle-error-leaves-defi-lender-moonwell-1-8-million-bad-debt",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                description="A DeFi lending protocol incurred bad debt due to an oracle configuration error.",
+            )
+        ],
+    )
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=1,
+        max_cases=1,
+        evm_only=True,
+        require_seed_transaction_hash=False,
+        require_replay_block=False,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["case_count"] == 0
+    assert "insufficient_eligible_cases" in payload["errors"]
+
+    exclusion_log = json.loads((tmp_path / "cohort" / "exclusion_log.json").read_text(encoding="utf-8"))
+    entry = exclusion_log["entries"][0]
+    assert entry["reason"] == "missing_security_anchor"
+    assert entry["pipeline_stages"]["candidate_discovery"]["status"] == "accepted"
+    assert entry["pipeline_stages"]["security_evidence_enrichment"]["status"] == "missing"
+    assert entry["candidate_discovery_sources"] == [
+        {
+            "source": "slowmist_hacked",
+            "url": "https://hacked.slowmist.io/?c=&page=1",
+            "role": "candidate_discovery",
+        }
+    ]
+    assert entry["security_report_sources"] == []
+
+
 def test_replay_cohort_uses_replay_results_only_as_fixture_metadata(tmp_path):
     incidents_csv = tmp_path / "incidents.csv"
     replay_results_csv = tmp_path / "replay_results.csv"
@@ -414,6 +477,8 @@ def test_replay_cohort_uses_replay_results_only_as_fixture_metadata(tmp_path):
     assert case["test_path"] == "test/replay/AnchoredSlowMistCandidate.t.sol"
     assert case["fixture_result"]["status"] == "verified"
     assert case["eligibility"] == "security_anchor_with_replay_fixture"
+    assert case["pipeline_stages"]["security_evidence_enrichment"]["status"] == "verified"
+    assert case["pipeline_stages"]["replay_cohort_selection"]["fixture_metadata_attached"] is True
 
 
 def test_replay_cohort_enriches_public_candidates_and_filters_by_supported_rpc_chain(tmp_path):
@@ -510,6 +575,10 @@ def test_replay_cohort_enriches_public_candidates_and_filters_by_supported_rpc_c
     assert all(case["rpc_supported"] is True for case in manifest["cases"])
     assert all(case["security_report_sources"] for case in manifest["cases"])
     assert all(case["evidence_level_target"] == "L1" for case in manifest["cases"])
+    assert all(
+        case["pipeline_stages"]["alchemy_onchain_backfill"]["status"] == "required"
+        for case in manifest["cases"]
+    )
     exclusion_log = json.loads((tmp_path / "cohort" / "exclusion_log.json").read_text(encoding="utf-8"))
     excluded = {(entry["slug"], entry["reason"]) for entry in exclusion_log["entries"]}
     assert ("unsupported-polygon-candidate", "rpc_chain_unsupported") in excluded
@@ -553,4 +622,5 @@ def test_replay_cohort_cli_round_trip(tmp_path):
     assert payload["case_count"] == 10
     assert (out / "manifest.json").exists()
     assert (out / "exclusion_log.json").exists()
+    assert (out / "stage_ledger.json").exists()
     assert len(list((out / "cases").glob("*.json"))) == 10
