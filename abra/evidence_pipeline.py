@@ -123,6 +123,17 @@ def produce_evidence_pipeline(
     enriched_rows = [_enrich_security_evidence(row) for row in incident_rows]
     reference_fetch_budget = _reference_fetch_budget()
     anchor_discovery_budget = _onchain_anchor_discovery_budget()
+    backfill_candidate_rows = [
+        row
+        for row in enriched_rows
+        if row["reference_url"] or row["seed_transaction_hash"] or extract_seed_transaction_hash(row)
+    ]
+    reference_fetch_ids = _prioritized_reference_fetch_ids(backfill_candidate_rows, rpc_chains, reference_fetch_budget)
+    anchor_discovery_ids = _prioritized_anchor_discovery_ids(
+        backfill_candidate_rows,
+        rpc_chains,
+        anchor_discovery_budget,
+    )
     backfill_rows = [
         _build_backfill_row(
             row,
@@ -132,13 +143,11 @@ def produce_evidence_pipeline(
             source_fetcher=source_fetcher or fetch_security_source_text,
             anchor_searcher=anchor_searcher or search_onchain_anchor_sources,
             rpc_caller=rpc_caller or json_rpc_call,
-            allow_reference_fetch=row["security_anchor"] == "true" or index < reference_fetch_budget,
+            allow_reference_fetch=row["security_anchor"] == "true" or row["incident_id"] in reference_fetch_ids,
             allow_anchor_discovery=_onchain_anchor_discovery_enabled()
-            and index < anchor_discovery_budget
-            and (not row["seed_transaction_hash"] or not row["fork_block"]),
+            and row["incident_id"] in anchor_discovery_ids,
         )
-        for index, row in enumerate(enriched_rows)
-        if row["reference_url"] or row["seed_transaction_hash"] or extract_seed_transaction_hash(row)
+        for row in backfill_candidate_rows
     ]
 
     _write_csv(out_path / SECURITY_EVIDENCE_CSV, enriched_rows, SECURITY_EVIDENCE_FIELDS)
@@ -390,6 +399,126 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
     }
 
 
+def _prioritized_reference_fetch_ids(
+    rows: list[dict[str, str]],
+    rpc_supported_chains: set[str],
+    budget: int,
+) -> set[str]:
+    if budget <= 0:
+        return set()
+    return _top_budgeted_incident_ids(
+        rows,
+        budget,
+        priority_fn=lambda row: _reference_fetch_priority(row, rpc_supported_chains),
+    )
+
+
+def _prioritized_anchor_discovery_ids(
+    rows: list[dict[str, str]],
+    rpc_supported_chains: set[str],
+    budget: int,
+) -> set[str]:
+    if budget <= 0:
+        return set()
+    return _top_budgeted_incident_ids(
+        rows,
+        budget,
+        priority_fn=lambda row: _anchor_discovery_priority(row, rpc_supported_chains),
+    )
+
+
+def _top_budgeted_incident_ids(
+    rows: list[dict[str, str]],
+    budget: int,
+    *,
+    priority_fn: Callable[[dict[str, str]], int],
+) -> set[str]:
+    ranked: list[tuple[int, int, str]] = []
+    for index, row in enumerate(rows):
+        priority = priority_fn(row)
+        if priority <= 0:
+            continue
+        ranked.append((priority, -index, row["incident_id"]))
+    ranked.sort(reverse=True)
+    return {incident_id for _, _, incident_id in ranked[:budget]}
+
+
+def _reference_fetch_priority(row: dict[str, str], rpc_supported_chains: set[str]) -> int:
+    if row.get("seed_transaction_hash") and row.get("fork_block"):
+        return 0
+    if not _row_rpc_supported(row, rpc_supported_chains):
+        return 0
+    priority = 10
+    if _row_has_tx_hint(row):
+        priority += 100
+    if row.get("security_anchor") == "true":
+        priority += 80
+    if _row_has_security_social_source(row):
+        priority += 20
+    return priority
+
+
+def _anchor_discovery_priority(row: dict[str, str], rpc_supported_chains: set[str]) -> int:
+    if row.get("seed_transaction_hash") and row.get("fork_block"):
+        return 0
+    if not _row_rpc_supported(row, rpc_supported_chains):
+        return 0
+    missing_seed = not row.get("seed_transaction_hash")
+    missing_block = not row.get("fork_block")
+    if not missing_seed and not missing_block:
+        return 0
+    priority = 10
+    if row.get("security_anchor") == "true":
+        priority += 100
+    if _row_has_security_social_source(row):
+        priority += 40
+    if _row_has_tx_hint(row):
+        priority += 30
+    if missing_seed:
+        priority += 10
+    if missing_block:
+        priority += 5
+    return priority
+
+
+def _row_rpc_supported(row: dict[str, str], rpc_supported_chains: set[str]) -> bool:
+    return chain_rpc_supported(normalize_chain(row.get("chain") or ""), rpc_supported_chains)
+
+
+def _row_has_security_social_source(row: dict[str, str]) -> bool:
+    return any(
+        _requires_specialized_social_fetch(str(source.get("url") or ""))
+        for source in _safe_json_list(row.get("security_report_sources") or "[]")
+    )
+
+
+def _row_has_tx_hint(row: dict[str, str]) -> bool:
+    if extract_seed_transaction_hash(row):
+        return True
+    text = " ".join(
+        [
+            str(row.get("reference_url") or ""),
+            str(row.get("source_url") or ""),
+            str(row.get("description") or ""),
+        ]
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "/tx/",
+            "tx=",
+            "transaction hash",
+            "attack tx",
+            "exploit tx",
+            "etherscan",
+            "bscscan",
+            "arbiscan",
+            "basescan",
+            "polygonscan",
+        )
+    )
+
+
 def _safe_json_list(value: str) -> list[dict[str, str]]:
     try:
         loaded = json.loads(value)
@@ -604,6 +733,7 @@ def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:
     slug = str(context.get("slug") or "").replace("-", " ").strip()
     chain = normalize_chain(str(context.get("chain") or ""))
     date = str(context.get("event_date") or "").strip()
+    security_source_names = _security_source_names_from_context(context)
     names = [name for name in (target, slug) if name]
     if not names:
         names = ["DeFi exploit"]
@@ -611,12 +741,29 @@ def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:
     explorer = _explorer_domain_for_chain(chain)
     suffix = f" {date}" if date else ""
     queries = [
+        f"{base}{suffix} site:{explorer}/tx",
         f"{base}{suffix} exploit transaction hash",
         f"{base}{suffix} attack tx hash",
         f"{base}{suffix} {explorer} tx",
         f"{base}{suffix} BlockSec PeckShield CertiK exploit transaction",
     ]
+    for source_name in security_source_names:
+        queries.extend(
+            [
+                f"{base}{suffix} {source_name} transaction hash",
+                f"{base}{suffix} {source_name} {explorer} tx",
+            ]
+        )
     return _dedupe_strings(queries)
+
+
+def _security_source_names_from_context(context: dict[str, str]) -> list[str]:
+    names: list[str] = []
+    for source in _safe_json_list(str(context.get("security_report_sources") or "[]")):
+        name = str(source.get("source") or "").strip()
+        if name:
+            names.append(name)
+    return _dedupe_strings(names)
 
 
 def _explorer_domain_for_chain(chain: str) -> str:
