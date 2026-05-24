@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 from abra.chain_support import (
     EVM_CHAIN_IDS,
@@ -87,6 +88,8 @@ def build_replay_cohort(
     include_evidence_candidates: bool = True,
     rpc_provider: str = "alchemy",
     rpc_supported_chains: list[str] | None = None,
+    source_fetcher: Callable[[str], dict[str, str]] | None = None,
+    rpc_caller: Callable[[str, str, list[str]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Materialize a bounded replay cohort and explicit exclusion log.
 
@@ -111,6 +114,8 @@ def build_replay_cohort(
         out_dir=incidents_path.parent,
         rpc_provider=rpc_provider,
         rpc_supported_chains=rpc_supported_chains,
+        source_fetcher=source_fetcher,
+        rpc_caller=rpc_caller,
     )
     security_evidence_path = incidents_path.parent / SECURITY_EVIDENCE_CSV
     alchemy_backfill_path = incidents_path.parent / ALCHEMY_BACKFILL_CSV
@@ -383,7 +388,11 @@ def _normalize_incident(
     card = _event_card_metadata(event_card)
     inferred_chain = _normalize_chain(security_stage.get("chain") or _infer_chain(row, replay))
     chain_id = _parse_int(security_stage.get("chain_id")) if security_stage.get("chain_id") else _chain_id(inferred_chain)
-    seed_hash = security_stage.get("seed_transaction_hash") or _extract_seed_transaction_hash(row, replay, card)
+    seed_hash = (
+        alchemy_stage.get("seed_transaction_hash")
+        or security_stage.get("seed_transaction_hash")
+        or _extract_seed_transaction_hash(row, replay, card)
+    )
     fork_block = _parse_int(
         alchemy_stage.get("fork_block")
         or security_stage.get("fork_block")
@@ -572,7 +581,7 @@ def _exclusion_reason(
         return "rpc_chain_unsupported"
     if not case["provenance_url"]:
         return "missing_provenance"
-    if not case["security_anchor"]:
+    if not case["security_anchor"] and (not case["seed_transaction_hash"] or not case["fork_block"]):
         return "missing_security_anchor"
     if not include_evidence_candidates:
         if not case["seed_transaction_hash"]:
@@ -661,10 +670,10 @@ def _case_payload(case: dict[str, Any], generated_at: str) -> dict[str, Any]:
 def _case_eligibility(case: dict[str, Any]) -> str:
     if case["replay_test"] and case["test_path"] and case["security_anchor"]:
         return "security_anchor_with_replay_fixture"
+    if case["seed_transaction_hash"] and case["fork_block"]:
+        return "onchain_anchor_ready" if not case["security_anchor"] else "security_anchor_ready"
     if case["security_anchor"] and (not case["seed_transaction_hash"] or not case["fork_block"]):
         return "security_anchor_backfill_required"
-    if case["security_anchor"]:
-        return "security_anchor_ready"
     return "candidate_discovery_only"
 
 
@@ -757,7 +766,11 @@ def _pipeline_stages(
             "sources": case.get("candidate_discovery_sources") or [],
         },
         "security_evidence_enrichment": {
-            "status": "verified" if case.get("security_anchor") else "missing",
+            "status": "verified"
+            if case.get("security_anchor")
+            else "reference_only"
+            if case.get("seed_transaction_hash")
+            else "missing",
             "sources": case.get("security_report_sources") or [],
         },
         "alchemy_onchain_backfill": _alchemy_backfill_stage(case),
@@ -780,9 +793,9 @@ def _alchemy_backfill_stage(case: dict[str, Any]) -> dict[str, Any]:
         if not value
     ]
     if not case.get("security_anchor"):
-        status = "not_applicable"
+        status = "verified" if not missing else "required"
     elif not missing:
-        status = "not_required"
+        status = "verified"
     elif case.get("rpc_supported"):
         status = "required"
     else:

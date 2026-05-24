@@ -114,6 +114,7 @@ def produce_evidence_pipeline(
     generated_at = _utc_now()
 
     enriched_rows = [_enrich_security_evidence(row) for row in incident_rows]
+    reference_fetch_budget = _reference_fetch_budget()
     backfill_rows = [
         _build_backfill_row(
             row,
@@ -122,9 +123,10 @@ def produce_evidence_pipeline(
             incident_context=row,
             source_fetcher=source_fetcher or fetch_security_source_text,
             rpc_caller=rpc_caller or json_rpc_call,
+            allow_reference_fetch=row["security_anchor"] == "true" or index < reference_fetch_budget,
         )
-        for row in enriched_rows
-        if row["security_anchor"] == "true"
+        for index, row in enumerate(enriched_rows)
+        if row["reference_url"] or row["seed_transaction_hash"] or extract_seed_transaction_hash(row)
     ]
 
     _write_csv(out_path / SECURITY_EVIDENCE_CSV, enriched_rows, SECURITY_EVIDENCE_FIELDS)
@@ -230,20 +232,22 @@ def _build_backfill_row(
     incident_context: dict[str, str],
     source_fetcher: SourceFetcher,
     rpc_caller: RpcCaller,
+    allow_reference_fetch: bool,
 ) -> dict[str, str]:
     chain = normalize_chain(row.get("chain") or "")
-    seed_hash = row.get("seed_transaction_hash") or ""
+    seed_hash = row.get("seed_transaction_hash") or extract_seed_transaction_hash(row) or ""
     fork_block = row.get("fork_block") or ""
-    security_sources = _safe_json_list(row.get("security_report_sources") or "[]")
+    evidence_sources = _backfill_evidence_sources(row)
     source_evidence_url = ""
     source_fetch_status = "not_required" if seed_hash and fork_block else "not_attempted"
     source_extracted_hash = ""
     source_extracted_block = ""
-    if (not seed_hash or not fork_block) and security_sources:
+    if (not seed_hash or not fork_block) and evidence_sources:
         source_evidence = _extract_onchain_anchor_from_security_sources(
-            security_sources,
+            evidence_sources,
             incident_context=incident_context,
             source_fetcher=source_fetcher,
+            allow_reference_fetch=allow_reference_fetch,
         )
         source_fetch_status = source_evidence["source_fetch_status"]
         source_evidence_url = source_evidence["source_evidence_url"]
@@ -323,7 +327,11 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
         "blocked_rpc_unsupported_count": sum(
             1 for row in backfill_rows if row["backfill_status"] == "blocked_rpc_unsupported"
         ),
-        "unanchored_skipped_count": sum(1 for row in enriched_rows if row["security_anchor"] != "true"),
+        "unanchored_skipped_count": sum(
+            1
+            for row in enriched_rows
+            if row["security_anchor"] != "true" and not row.get("seed_transaction_hash") and not extract_seed_transaction_hash(row)
+        ),
     }
 
 
@@ -337,16 +345,29 @@ def _safe_json_list(value: str) -> list[dict[str, str]]:
     return [item for item in loaded if isinstance(item, dict)]
 
 
+def _backfill_evidence_sources(row: dict[str, str]) -> list[dict[str, str]]:
+    sources = _safe_json_list(row.get("security_report_sources") or "[]")
+    urls = {str(source.get("url") or "") for source in sources}
+    reference_url = str(row.get("reference_url") or "").strip()
+    if reference_url and reference_url not in urls:
+        sources.append({"source": "reference_url", "url": reference_url})
+    return sources
+
+
 def _extract_onchain_anchor_from_security_sources(
     sources: list[dict[str, str]],
     *,
     incident_context: dict[str, str],
     source_fetcher: SourceFetcher,
+    allow_reference_fetch: bool,
 ) -> dict[str, str]:
     last_status = "not_attempted"
     for source in sources:
         url = str(source.get("url") or "")
         if not url:
+            continue
+        if not _should_fetch_for_onchain_anchor(source, allow_reference_fetch=allow_reference_fetch):
+            last_status = "source_fetch_skipped:no_tx_hint"
             continue
         try:
             fetched = source_fetcher(url)
@@ -396,6 +417,26 @@ def select_incident_context_text(text: str, incident_context: dict[str, str]) ->
     if len(re.findall(r"0x[a-fA-F0-9]{64}", haystack)) > 1:
         return ""
     return haystack
+
+
+def _should_fetch_for_onchain_anchor(source: dict[str, str], *, allow_reference_fetch: bool) -> bool:
+    source_name = str(source.get("source") or "")
+    url = str(source.get("url") or "")
+    if source_name != "reference_url":
+        return True
+    if allow_reference_fetch:
+        return True
+    lowered = url.lower()
+    if extract_seed_transaction_hash({"url": url}):
+        return True
+    return any(marker in lowered for marker in ("/tx/", "tx=", "transaction", "etherscan", "bscscan", "arbiscan", "polygonscan"))
+
+
+def _reference_fetch_budget() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_REFERENCE_FETCH_BUDGET", "20")))
+    except ValueError:
+        return 20
 
 
 def fetch_security_source_text(url: str) -> dict[str, str]:

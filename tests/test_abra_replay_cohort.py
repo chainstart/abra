@@ -356,6 +356,55 @@ def test_replay_cohort_requires_security_anchor_before_alchemy_backfill(tmp_path
     assert ("unanchored-ethereum-candidate", "missing_security_anchor") in excluded
 
 
+def test_replay_cohort_accepts_complete_onchain_evidence_without_security_anchor(tmp_path):
+    tx_hash = "0x" + "b" * 64
+    incidents_csv = tmp_path / "incidents.csv"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Reference Only Onchain Candidate",
+                reference_url=f"https://example.test/incidents/reference-only?tx={tx_hash}",
+                source_url="https://defillama.com/hacks",
+                seed_transaction_hash="",
+                fork_block="",
+                description="Ethereum exploit with direct transaction evidence but no security-company report.",
+            )
+        ],
+    )
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_001)}
+
+    payload = build_replay_cohort(
+        incidents_csv=incidents_csv,
+        out=tmp_path / "cohort",
+        min_cases=1,
+        max_cases=1,
+        evm_only=True,
+        require_seed_transaction_hash=True,
+        require_replay_block=True,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda _url: {"status": "source_fetch_skipped:test"},
+        rpc_caller=fake_rpc_caller,
+    )
+
+    assert payload["status"] == "passed"
+    assert payload["case_count"] == 1
+    manifest = json.loads((tmp_path / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    case = manifest["cases"][0]
+    assert case["security_anchor"] is False
+    assert case["seed_transaction_hash"] == tx_hash
+    assert case["fork_block"] == 20_000_001
+    assert case["eligibility"] == "onchain_anchor_ready"
+    assert case["pipeline_stages"]["security_evidence_enrichment"]["status"] == "reference_only"
+    assert case["pipeline_stages"]["alchemy_onchain_backfill"]["status"] == "verified"
+
+
 def test_replay_cohort_does_not_treat_candidate_feed_as_security_evidence(tmp_path):
     incidents_csv = tmp_path / "incidents.csv"
     _write_csv(

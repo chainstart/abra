@@ -124,7 +124,7 @@ def test_evidence_pipeline_materializes_security_enrichment_and_alchemy_backfill
     assert payload["status"] == "passed"
     assert payload["summary"]["candidate_count"] == 3
     assert payload["summary"]["security_anchored_count"] == 2
-    assert payload["summary"]["alchemy_backfill_candidate_count"] == 2
+    assert payload["summary"]["alchemy_backfill_candidate_count"] == 3
     assert payload["artifacts"] == {
         "security_evidence_csv": "security_evidence_enriched_latest.csv",
         "security_evidence_json": "security_evidence_enriched_latest.json",
@@ -156,12 +156,15 @@ def test_evidence_pipeline_materializes_security_enrichment_and_alchemy_backfill
     assert {row["slug"] for row in backfill_rows} == {
         "certik-anchored-missing-onchain",
         "blocksec-complete-anchor",
+        "slowmist-feed-only",
     }
     backfill_by_slug = {row["slug"]: row for row in backfill_rows}
     assert backfill_by_slug["certik-anchored-missing-onchain"]["backfill_status"] == "missing_onchain_anchor"
     assert backfill_by_slug["certik-anchored-missing-onchain"]["rpc_supported"] == "true"
     assert backfill_by_slug["blocksec-complete-anchor"]["backfill_status"] == "not_required"
     assert backfill_by_slug["blocksec-complete-anchor"]["seed_transaction_hash"] == "0x" + "2" * 64
+    assert backfill_by_slug["slowmist-feed-only"]["security_anchor"] == "false"
+    assert backfill_by_slug["slowmist-feed-only"]["backfill_status"] == "missing_onchain_anchor"
 
     enriched_json = json.loads((out_dir / "security_evidence_enriched_latest.json").read_text(encoding="utf-8"))
     assert enriched_json["stage"] == "security_evidence_enrichment"
@@ -348,6 +351,49 @@ def test_evidence_pipeline_backfills_tx_hash_and_block_from_security_source_and_
     assert payload["summary"]["backfilled_onchain_anchor_count"] == 1
 
 
+def test_evidence_pipeline_backfills_reference_tx_without_security_source_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    tx_hash = "0x" + "b" * 64
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Reference Only Onchain Candidate",
+                reference_url=f"https://example.org/incidents/reference-only?tx={tx_hash}",
+                source_url="https://defillama.com/hacks",
+                seed_transaction_hash="",
+                fork_block="",
+                description="Reference-only report with a direct transaction anchor.",
+            ),
+        ],
+    )
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_001)}
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=lambda _url: {"status": "source_fetch_skipped:test"},
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    assert rows[0]["security_anchor"] == "false"
+    assert rows[0]["backfill_status"] == "backfilled_onchain_anchor"
+    assert rows[0]["seed_transaction_hash"] == tx_hash
+    assert rows[0]["fork_block"] == "20000001"
+    assert rows[0]["rpc_backfill_status"] == "receipt_verified"
+
+
 def test_evidence_pipeline_uses_target_context_when_extracting_weekly_roundup_tx_hashes(tmp_path):
     squid_tx = "0x" + "1" * 64
     sas_tx = "0x" + "2" * 64
@@ -401,6 +447,87 @@ def test_evidence_pipeline_uses_target_context_when_extracting_weekly_roundup_tx
     rows = {row["slug"]: row for row in _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")}
     assert rows["squid-multicall"]["seed_transaction_hash"] == squid_tx
     assert rows["sas-token"]["seed_transaction_hash"] == sas_tx
+
+
+def test_evidence_pipeline_extracts_explorer_tx_links_from_reference_pages(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    tx_hash = "0x" + "c" * 64
+    report_url = "https://example.org/reports/explorer-link-candidate"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Explorer Link Candidate",
+                reference_url=report_url,
+                source_url="https://defillama.com/hacks",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fake_source_fetcher(url: str) -> dict[str, str]:
+        assert url == report_url
+        return {
+            "status": "fetched",
+            "url": url,
+            "text": f'Attack transaction: <a href="https://etherscan.io/tx/{tx_hash}">exploit tx</a>',
+        }
+
+    def fake_rpc_caller(_chain: str, _method: str, _params: list[str]) -> dict[str, str]:
+        return {"blockNumber": hex(20_000_002)}
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=fake_source_fetcher,
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    assert rows[0]["security_anchor"] == "false"
+    assert rows[0]["seed_transaction_hash"] == tx_hash
+    assert rows[0]["fork_block"] == "20000002"
+
+
+def test_evidence_pipeline_does_not_live_fetch_generic_reference_pages_without_tx_hint(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_REFERENCE_FETCH_BUDGET", "0")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Generic News Candidate",
+                reference_url="https://example.org/news/generic-defi-incident",
+                source_url="https://defillama.com/hacks",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fail_if_fetched(url: str) -> dict[str, str]:
+        raise AssertionError(f"generic reference should not be live-fetched by default: {url}")
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=fail_if_fetched,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    assert rows[0]["source_fetch_status"] == "source_fetch_skipped:no_tx_hint"
+    assert rows[0]["backfill_status"] == "missing_onchain_anchor"
 
 
 def test_evidence_pipeline_skips_default_live_fetch_for_social_alert_urls(tmp_path, monkeypatch):
