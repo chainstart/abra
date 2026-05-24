@@ -17,6 +17,18 @@ SECURITY_REPORT_SOURCES = {
     "openzeppelin": ("openzeppelin.com",),
 }
 
+SECURITY_ALERT_SOCIAL_HANDLES = {
+    "certikalert": "certik",
+    "peckshieldalert": "peckshield",
+    "peckshield": "peckshield",
+    "phalcon_xyz": "blocksec",
+    "slowmist_team": "slowmist",
+    "defimonalerts": "defimon",
+    "blockaid_": "blockaid",
+    "defi_nerd_sec": "defi_nerd",
+    "exvulsec": "exvul",
+}
+
 
 def candidate_discovery_sources(row: dict[str, str]) -> list[dict[str, str]]:
     """Return public candidate feeds only; these are not security anchors."""
@@ -43,6 +55,13 @@ def security_report_sources(row: dict[str, str], card: dict[str, str] | None = N
     sources: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for url in usable_reference_urls:
+        social_source = security_alert_social_source(url)
+        if social_source:
+            key = (social_source, url)
+            if key not in seen:
+                sources.append({"source": social_source, "url": url})
+                seen.add(key)
+            continue
         host = url_host(url)
         for name, markers in SECURITY_REPORT_SOURCES.items():
             if any(marker_matches_host(marker, host) for marker in markers):
@@ -51,6 +70,15 @@ def security_report_sources(row: dict[str, str], card: dict[str, str] | None = N
                     sources.append({"source": name, "url": url})
                     seen.add(key)
     return sources
+
+
+def security_alert_social_source(url: str) -> str:
+    parsed = urlparse(url.strip())
+    host = (parsed.netloc or parsed.path.split("/", 1)[0]).lower().removeprefix("www.")
+    if host not in {"x.com", "twitter.com"}:
+        return ""
+    handle = parsed.path.strip("/").split("/", 1)[0].lower()
+    return SECURITY_ALERT_SOCIAL_HANDLES.get(handle, "")
 
 
 def text_only_security_mentions_ignored(row: dict[str, str], card: dict[str, str] | None = None) -> bool:

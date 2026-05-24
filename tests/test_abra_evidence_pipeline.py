@@ -245,6 +245,45 @@ def test_evidence_pipeline_uses_broad_alchemy_supported_chain_boundary(tmp_path,
     assert all(row["rpc_supported"] == "true" for row in rows)
 
 
+def test_evidence_pipeline_accepts_official_security_alert_x_accounts_only(tmp_path):
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="PeckShield Alert Candidate",
+                reference_url="https://x.com/PeckShieldAlert/status/2035565047133401563",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                description="PeckShield alerted on X about suspicious minting activity.",
+            ),
+            _incident(
+                2,
+                target="Random X Candidate",
+                reference_url="https://x.com/random_user/status/2035565047133401563",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                description="A random user mentioned PeckShield in passing.",
+            ),
+        ],
+    )
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    rows = {row["slug"]: row for row in _read_csv(out_dir / "security_evidence_enriched_latest.csv")}
+    peckshield_sources = json.loads(rows["peckshield-alert-candidate"]["security_report_sources"])
+    assert peckshield_sources == [
+        {"source": "peckshield", "url": "https://x.com/PeckShieldAlert/status/2035565047133401563"}
+    ]
+    assert rows["peckshield-alert-candidate"]["security_anchor"] == "true"
+    assert rows["random-x-candidate"]["security_anchor"] == "false"
+    assert json.loads(rows["random-x-candidate"]["security_report_sources"]) == []
+
+
 def test_defillama_collector_persists_hack_candidates(tmp_path, monkeypatch):
     collector = _load_pipeline_module("defillama_collector")
 
