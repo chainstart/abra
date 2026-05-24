@@ -795,13 +795,21 @@ def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:
     base = names[0]
     explorer = _explorer_domain_for_chain(chain)
     suffix = f" {date}" if date else ""
-    queries = [
+    queries = _source_specific_anchor_queries(
+        base=base,
+        suffix=suffix,
+        explorer=explorer,
+        security_source_names=security_source_names,
+    )
+    queries.extend(
+        [
         f"{base}{suffix} site:{explorer}/tx",
         f"{base}{suffix} exploit transaction hash",
         f"{base}{suffix} attack tx hash",
         f"{base}{suffix} {explorer} tx",
         f"{base}{suffix} BlockSec PeckShield CertiK exploit transaction",
-    ]
+        ]
+    )
     for source_name in security_source_names:
         queries.extend(
             [
@@ -810,6 +818,54 @@ def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:
             ]
         )
     return _dedupe_strings(queries)
+
+
+def _source_specific_anchor_queries(
+    *,
+    base: str,
+    suffix: str,
+    explorer: str,
+    security_source_names: list[str],
+) -> list[str]:
+    queries: list[str] = []
+    for source_name in security_source_names:
+        for domain in _security_source_search_domains(source_name):
+            queries.extend(
+                [
+                    f"{base}{suffix} site:{domain} tx",
+                    f"{base}{suffix} site:{domain} transaction hash",
+                    f"{base}{suffix} site:{domain} {explorer}",
+                ]
+            )
+    for domain in _common_security_anchor_domains():
+        queries.append(f"{base}{suffix} site:{domain} tx")
+    return queries
+
+
+def _security_source_search_domains(source_name: str) -> list[str]:
+    normalized = source_name.strip().lower()
+    domains_by_source = {
+        "blockaid": ["blockaid.io", "app.blockaid.io"],
+        "blocksec": ["blocksec.com", "app.blocksec.com", "phalcon.blocksec.com"],
+        "defimon": ["defimon.xyz", "defimon.io", "x.com/DefimonAlerts"],
+        "defi_nerd": ["x.com/Defi_Nerd_sec"],
+        "peckshield": ["peckshield.com", "x.com/PeckShieldAlert"],
+        "slowmist": ["slowmist.io", "hacked.slowmist.io", "x.com/SlowMist_Team"],
+        "certik": ["certik.com", "skynet.certik.com", "x.com/CertiKAlert"],
+        "exvul": ["x.com/exvulsec"],
+    }
+    return domains_by_source.get(normalized, [])
+
+
+def _common_security_anchor_domains() -> list[str]:
+    return [
+        "phalcon.blocksec.com",
+        "app.blocksec.com",
+        "blocksec.com",
+        "peckshield.com",
+        "slowmist.io",
+        "hacked.slowmist.io",
+    ]
 
 
 def _security_source_names_from_context(context: dict[str, str]) -> list[str]:

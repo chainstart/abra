@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from abra.chain_support import rpc_url_for_chain
+from abra.evidence_pipeline import _onchain_anchor_queries
 from abra.evidence_pipeline import produce_evidence_pipeline
 
 
@@ -834,6 +835,110 @@ def test_evidence_pipeline_bounds_anchor_search_requests_and_timeout(tmp_path, m
     assert all("brave.com" not in url for url, _ in requested)
     assert rows[0]["anchor_discovery_status"] == "anchor_discovery_failed:TimeoutError"
     assert rows[0]["rpc_backfill_status"] == "not_attempted"
+
+
+def test_evidence_pipeline_uses_security_source_specific_anchor_queries(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_ANCHOR_DISCOVERY_BUDGET", "1")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_PROVIDERS", "bing")
+    monkeypatch.setenv("ABRA_ONCHAIN_SEARCH_MAX_REQUESTS", "8")
+    tx_hash = "0x" + "4" * 64
+    explorer_url = f"https://basescan.org/tx/{tx_hash}"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Blockaid Source Candidate",
+                chain="base",
+                reference_url="https://x.com/blockaid_/status/2054593377438421492",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested_urls: list[str] = []
+
+    class FakeSearchResponse:
+        headers = {"content-type": "text/html"}
+
+        def __init__(self, text: str):
+            self.text = text
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return self.text.encode()
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        requested_urls.append(request.full_url)
+        decoded_url = request.full_url.lower()
+        if "site%3ablockaid.io" in decoded_url:
+            return FakeSearchResponse(f'Blockaid analysis: <a href="{explorer_url}">attacker tx</a>')
+        return FakeSearchResponse("generic search result without transaction evidence")
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "base"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_009)}
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["base"],
+        source_fetcher=lambda url: {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""},
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(rows) == 1
+    row = rows[0]
+    assert any("site%3ablockaid.io" in url.lower() for url in requested_urls)
+    assert row["anchor_discovery_status"] == "discovered"
+    assert row["anchor_discovery_url"] == explorer_url
+    assert row["anchor_discovery_seed_transaction_hash"] == tx_hash
+    assert row["seed_transaction_hash"] == tx_hash
+    assert row["fork_block"] == "20000009"
+    assert row["rpc_backfill_status"] == "receipt_verified"
+
+
+def test_onchain_anchor_queries_include_source_specific_security_domains():
+    context = {
+        "target": "Fixture Exploit",
+        "slug": "fixture-exploit",
+        "event_date": "2026-02-01",
+        "chain": "ethereum",
+        "security_report_sources": json.dumps(
+            [
+                {"source": "blocksec", "url": "https://x.com/Phalcon_xyz/status/1"},
+                {"source": "peckshield", "url": "https://x.com/PeckShieldAlert/status/2"},
+                {"source": "slowmist", "url": "https://x.com/SlowMist_Team/status/3"},
+                {"source": "defimon", "url": "https://x.com/DefimonAlerts/status/4"},
+            ]
+        ),
+    }
+
+    queries = _onchain_anchor_queries(context)
+    query_text = "\n".join(queries).lower()
+
+    assert "site:phalcon.blocksec.com" in query_text
+    assert "site:app.blocksec.com" in query_text
+    assert "site:peckshield.com" in query_text
+    assert "site:slowmist.io" in query_text
+    assert "site:defimon.xyz" in query_text
+    assert "site:etherscan.io/tx" in query_text
 
 
 def test_evidence_pipeline_uses_alchemy_receipt_before_anchor_discovery_when_seed_tx_exists(tmp_path, monkeypatch):
