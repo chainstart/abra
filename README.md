@@ -164,14 +164,17 @@ Outputs:
 ### Build an Alchemy-Bounded Replay Cohort
 
 Use `abra replay cohort` before replay assessment when ARA asks ABRA to produce blockchain
-evidence. The cohort builder first consumes public incident/security-source candidates, enriches
-them through a four-stage boundary: `candidate_discovery` from public sources such as SlowMist and
-DefiLlama, `security_evidence_enrichment` from anchored security/public reports, optional
-`alchemy_onchain_backfill` only for security-anchored incidents that still miss tx hashes or replay
-blocks, and `replay_cohort_selection` from those staged outputs. Local event cards and
-`replay_results.csv` only attach fixture metadata to already-qualified incidents; they never create
-new candidates on their own. Missing transaction hashes or fork blocks remain visible as diagnostic
-evidence boundaries instead of being silently treated as replay-ready cases.
+evidence. The cohort builder first consumes public incident candidates from SlowMist Hacked and
+DefiLlama hacks/losses, then materializes a four-stage evidence boundary:
+`candidate_discovery`, `security_evidence_enrichment`, `alchemy_onchain_backfill`, and
+`replay_cohort_selection`. Security enrichment requires URL-host anchored reports such as CertiK,
+BlockSec, PeckShield, SlowMist incident pages, Rekt, Immunefi, Beosin, ChainSecurity, or OpenZeppelin;
+text-only mentions of security firms do not count. Alchemy backfill runs only after a security
+anchor exists and records missing tx hash / fork block / chain support status; it does not invent
+new candidates. Local event cards and `replay_results.csv` only attach fixture metadata to
+already-qualified incidents; they never create new candidates on their own. Missing transaction
+hashes or fork blocks remain visible as diagnostic evidence boundaries instead of being silently
+treated as replay-ready cases.
 
 ```bash
 ALCHEMY_API_KEY=... \
@@ -186,6 +189,17 @@ python3 -m abra replay cohort \
 
 If neither `ALCHEMY_API_KEY` nor an Alchemy RPC URL is configured, the command fails with
 `alchemy_rpc_not_configured` rather than falling back to unrelated public RPC providers.
+
+Stage outputs:
+
+- `data/processed/security_evidence_enriched_latest.csv`
+- `data/processed/security_evidence_enriched_latest.json`
+- `data/processed/alchemy_onchain_backfill_latest.csv`
+- `data/processed/alchemy_onchain_backfill_latest.json`
+- `runs/abra_evidence/cohort/manifest.json`
+- `runs/abra_evidence/cohort/exclusion_log.json`
+- `runs/abra_evidence/cohort/stage_ledger.json`
+- `runs/abra_evidence/cohort/cases/*.json`
 
 ## Audit Framework
 

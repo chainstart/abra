@@ -189,11 +189,13 @@ def normalize_datasets(
     slowmist_csv: Path,
     defillama_protocols_csv: Path,
     output_dir: Path,
+    defillama_hacks_csv: Path | None = None,
 ) -> dict[str, str | int]:
     """Build normalized incidents and protocol tables."""
     ensure_dir(output_dir)
 
     slowmist_rows = read_csv(slowmist_csv)
+    defillama_hack_rows = read_csv(defillama_hacks_csv) if defillama_hacks_csv and defillama_hacks_csv.exists() else []
     protocols_rows = read_csv(defillama_protocols_csv)
 
     entries, token_index, exact_norm = build_protocol_index(protocols_rows)
@@ -220,10 +222,39 @@ def normalize_datasets(
                 "attack_family": family,
                 "loss_usd_raw": loss_raw,
                 "loss_usd": "" if loss_val is None else f"{loss_val:.2f}",
+                "chain": "",
                 "reference_url": row.get("reference_url", ""),
                 "source_url": row.get("source_url", ""),
                 "source_page": row.get("source_page", ""),
                 "category_filter": row.get("category_filter", ""),
+                "description": description,
+                "normalized_at": now_utc_iso(),
+            }
+        )
+    for row in defillama_hack_rows:
+        target = row.get("target", "")
+        description = row.get("description", "")
+        attack_method = row.get("attack_method", "")
+        protocol_slug = guess_protocol_slug(target, entries, token_index, exact_norm)
+        loss_val = parse_loss_usd(str(row.get("loss_usd_raw") or row.get("loss_usd") or ""))
+        family = classify_attack_family(attack_method or row.get("classification", ""), description)
+        defi_flag = is_defi_event(target, description, attack_method, protocol_slug) or _is_defillama_defi_hack(row)
+        normalized_incidents.append(
+            {
+                "incident_id": row.get("incident_id", ""),
+                "event_date": row.get("event_date", ""),
+                "target": target,
+                "protocol_slug_guess": protocol_slug,
+                "is_defi": str(defi_flag).lower(),
+                "attack_method_raw": attack_method,
+                "attack_family": family,
+                "loss_usd_raw": row.get("loss_usd_raw", ""),
+                "loss_usd": "" if loss_val is None else f"{loss_val:.2f}",
+                "chain": row.get("chain", ""),
+                "reference_url": row.get("reference_url", ""),
+                "source_url": row.get("source_url", ""),
+                "source_page": "",
+                "category_filter": "defillama_hacks",
                 "description": description,
                 "normalized_at": now_utc_iso(),
             }
@@ -264,6 +295,7 @@ def normalize_datasets(
             "attack_family",
             "loss_usd_raw",
             "loss_usd",
+            "chain",
             "reference_url",
             "source_url",
             "source_page",
@@ -300,6 +332,17 @@ def normalize_datasets(
     }
 
 
+def _is_defillama_defi_hack(row: dict) -> bool:
+    text = " ".join(
+        [
+            str(row.get("target_type") or ""),
+            str(row.get("classification") or ""),
+            str(row.get("description") or ""),
+        ]
+    ).lower()
+    return "defi" in text or "protocol" in text or "bridge" in text
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Normalize raw incident/protocol datasets")
     parser.add_argument(
@@ -312,6 +355,11 @@ def main() -> None:
         default="data/raw/defillama/defillama_protocols_slim_latest.csv",
         help="Input protocol CSV from defillama_collector.py",
     )
+    parser.add_argument(
+        "--defillama-hacks-csv",
+        default="data/raw/defillama/defillama_hacks_latest.csv",
+        help="Optional DefiLlama hacks CSV from defillama_collector.py",
+    )
     parser.add_argument("--output-dir", default="data/processed", help="Output directory")
     args = parser.parse_args()
 
@@ -319,6 +367,7 @@ def main() -> None:
         slowmist_csv=Path(args.slowmist_csv),
         defillama_protocols_csv=Path(args.defillama_protocols_csv),
         output_dir=Path(args.output_dir),
+        defillama_hacks_csv=Path(args.defillama_hacks_csv),
     )
     print(
         f"[normalize] incidents: {summary['incident_rows']} | "

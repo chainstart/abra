@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -13,8 +12,29 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
+from abra.chain_support import (
+    EVM_CHAIN_IDS,
+    chain_id as _shared_chain_id,
+    chain_rpc_supported as _shared_chain_rpc_supported,
+    infer_chain as _shared_infer_chain,
+    load_local_environment,
+    normalize_chain as _shared_normalize_chain,
+    rpc_capability_state as _shared_rpc_capability_state,
+    rpc_env_for_chain as _shared_rpc_env_for_chain,
+)
+from abra.evidence_sources import (
+    candidate_discovery_sources as _shared_candidate_discovery_sources,
+    is_security_reference_url as _shared_is_security_reference_url,
+    marker_matches_host as _shared_marker_matches_host,
+    security_report_sources as _shared_security_report_sources,
+    url_host as _shared_url_host,
+)
+from abra.evidence_pipeline import (
+    ALCHEMY_BACKFILL_CSV,
+    SECURITY_EVIDENCE_CSV,
+    produce_evidence_pipeline,
+)
 from abra.manifest import repo_root
 
 
@@ -29,40 +49,6 @@ STAGE_ORDER = [
     "alchemy_onchain_backfill",
     "replay_cohort_selection",
 ]
-
-EVM_CHAIN_IDS = {
-    "ethereum": 1,
-    "eth": 1,
-    "mainnet": 1,
-    "polygon": 137,
-    "arbitrum": 42161,
-    "optimism": 10,
-    "base": 8453,
-    "bnb": 56,
-    "bsc": 56,
-    "avalanche": 43114,
-    "blast": 81457,
-    "sonic": 146,
-    "mantle": 5000,
-    "linea": 59144,
-    "celo": 42220,
-    "polygon_zkevm": 1101,
-    "zksync": 324,
-    "berachain": 80094,
-    "multi_evm": None,
-}
-
-NON_EVM_MARKERS = {
-    "sui": "sui",
-    "terra": "terra",
-    "cosmos": "cosmos",
-    "eos": "eos",
-    "stellar": "stellar",
-    "algorand": "algorand",
-    "near": "near",
-    "solana": "solana",
-    "bitcoin": "bitcoin",
-}
 
 TECHNICAL_FAMILY_WEIGHTS = {
     "oracle_manipulation": 9,
@@ -81,61 +67,6 @@ OPERATIONAL_FAMILIES = {
     "social_engineering",
     "supply_chain",
 }
-
-ALCHEMY_SUPPORTED_CHAINS = {
-    "ethereum",
-    "polygon",
-    "arbitrum",
-    "optimism",
-    "base",
-    "bsc",
-    "bnb",
-    "avalanche",
-    "blast",
-    "sonic",
-    "mantle",
-    "linea",
-    "celo",
-    "polygon_zkevm",
-    "zksync",
-    "berachain",
-    "multi_evm",
-}
-
-CHAIN_RPC_ENV = {
-    "ethereum": "ETH_RPC_URL",
-    "eth": "ETH_RPC_URL",
-    "mainnet": "ETH_RPC_URL",
-    "polygon": "POLYGON_RPC_URL",
-    "bsc": "BSC_RPC_URL",
-    "bnb": "BSC_RPC_URL",
-    "arbitrum": "ARBITRUM_RPC_URL",
-    "optimism": "OPTIMISM_RPC_URL",
-    "base": "BASE_RPC_URL",
-    "avalanche": "AVALANCHE_RPC_URL",
-    "blast": "BLAST_RPC_URL",
-    "sonic": "SONIC_RPC_URL",
-    "mantle": "MANTLE_RPC_URL",
-    "linea": "LINEA_RPC_URL",
-    "celo": "CELO_RPC_URL",
-    "polygon_zkevm": "POLYGON_ZKEVM_RPC_URL",
-    "zksync": "ZKSYNC_RPC_URL",
-    "berachain": "BERACHAIN_RPC_URL",
-    "multi_evm": "ETH_RPC_URL",
-}
-
-SECURITY_REPORT_SOURCES = {
-    "slowmist": ("slowmist.io", "hacked.slowmist.io", "slowmist_team"),
-    "certik": ("certik.com",),
-    "peckshield": ("peckshield", "peckshield.com"),
-    "blocksec": ("blocksec", "blocksec.com"),
-    "beosin": ("beosin", "beosin.com"),
-    "rekt": ("rekt.news",),
-    "immunefi": ("immunefi.com",),
-    "chainsecurity": ("chainsecurity.com",),
-    "openzeppelin": ("openzeppelin.com",),
-}
-
 
 def build_replay_cohort(
     *,
@@ -165,7 +96,7 @@ def build_replay_cohort(
     """
 
     root = repo_root()
-    _load_local_environment(root)
+    load_local_environment(root)
     if min_cases < 1:
         raise ValueError("min_cases must be positive.")
     if max_cases < min_cases:
@@ -175,12 +106,22 @@ def build_replay_cohort(
         _run_phase1_refresh(root, refresh_start_page, refresh_end_page, refresh_top_protocols)
 
     incidents_path = _resolve_repo_path(root, incidents_csv)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_path,
+        out_dir=incidents_path.parent,
+        rpc_provider=rpc_provider,
+        rpc_supported_chains=rpc_supported_chains,
+    )
+    security_evidence_path = incidents_path.parent / SECURITY_EVIDENCE_CSV
+    alchemy_backfill_path = incidents_path.parent / ALCHEMY_BACKFILL_CSV
     selected_path = _resolve_optional_repo_path(root, selected_incidents_csv)
     replay_path = _resolve_repo_path(root, replay_results_csv)
     cards_dir = _resolve_repo_path(root, event_cards_dir)
     out_path = _resolve_repo_path(root, out)
 
     incidents = _read_csv(incidents_path)
+    security_stage_by_id = _stage_rows_by_incident_id(security_evidence_path)
+    alchemy_stage_by_id = _stage_rows_by_incident_id(alchemy_backfill_path)
     selected_ids = _selected_incident_ids(selected_path)
     replay_by_slug = _replay_metadata_by_slug(replay_path)
     cards_by_slug = _event_cards_by_slug(cards_dir)
@@ -194,7 +135,16 @@ def build_replay_cohort(
     exclusion_reasons: dict[str, str] = {}
 
     for row in incidents:
-        normalized = _normalize_incident(row, replay_by_slug, cards_by_slug, selected_ids, rpc_chains)
+        incident_id = row.get("incident_id") or _sha1([row.get("target") or row.get("incident") or "", row.get("event_date", "")])
+        normalized = _normalize_incident(
+            row,
+            replay_by_slug,
+            cards_by_slug,
+            selected_ids,
+            rpc_chains,
+            security_stage=security_stage_by_id.get(incident_id, {}),
+            alchemy_stage=alchemy_stage_by_id.get(incident_id, {}),
+        )
         all_cases.append(normalized)
         reason = _exclusion_reason(
             normalized,
@@ -236,6 +186,8 @@ def build_replay_cohort(
         "generated_at": generated_at,
         "stage_order": list(STAGE_ORDER),
         "source_incidents_csv": str(incidents_path),
+        "security_evidence_csv": str(security_evidence_path),
+        "alchemy_backfill_csv": str(alchemy_backfill_path),
         "selected_incidents_csv": str(selected_path) if selected_path else None,
         "replay_results_csv": str(replay_path) if replay_path.exists() else None,
         "event_cards_dir": str(cards_dir) if cards_dir.exists() else None,
@@ -285,6 +237,10 @@ def build_replay_cohort(
         cases=all_cases,
         selected_ids=selected_ids_for_stage,
         exclusion_reasons=exclusion_reasons,
+        source_stage_artifacts={
+            "security_evidence_csv": str(security_evidence_path),
+            "alchemy_backfill_csv": str(alchemy_backfill_path),
+        },
     )
 
     _write_json(out_path / "manifest.json", manifest)
@@ -342,35 +298,17 @@ def _resolve_optional_repo_path(root: Path, value: str | Path | None) -> Path | 
     return path if path.exists() else None
 
 
-def _load_local_environment(root: Path) -> None:
-    if os.environ.get("ABRA_DISABLE_LOCAL_ENV"):
-        return
-    for path in (root / ".env", root / ".env.local"):
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            key, value = _parse_env_line(line)
-            if key and value and key not in os.environ:
-                os.environ[key] = value
-
-
-def _parse_env_line(line: str) -> tuple[str, str]:
-    text = line.strip()
-    if not text or text.startswith("#") or "=" not in text:
-        return "", ""
-    key, value = text.split("=", 1)
-    key = key.strip()
-    value = value.strip().strip('"').strip("'")
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-        return "", ""
-    return key, value
-
-
 def _read_csv(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         raise FileNotFoundError(f"Incident CSV not found: {path}")
     with path.open("r", encoding="utf-8", newline="") as fp:
         return list(csv.DictReader(fp))
+
+
+def _stage_rows_by_incident_id(path: Path) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    return {row.get("incident_id", ""): row for row in _read_csv(path) if row.get("incident_id")}
 
 
 def _selected_incident_ids(path: Path | None) -> set[str]:
@@ -433,24 +371,33 @@ def _normalize_incident(
     cards_by_slug: dict[str, Path],
     selected_ids: set[str],
     rpc_supported_chains: set[str],
+    security_stage: dict[str, str] | None = None,
+    alchemy_stage: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    security_stage = security_stage or {}
+    alchemy_stage = alchemy_stage or {}
     incident = (row.get("target") or row.get("incident") or "").strip()
     slug = _slug(row.get("slug") or incident or row.get("incident_id") or "incident")
     replay = replay_by_slug.get(slug, {})
     event_card = cards_by_slug.get(slug)
     card = _event_card_metadata(event_card)
-    inferred_chain = _infer_chain(row, replay)
-    chain_id = _chain_id(inferred_chain)
-    seed_hash = _extract_seed_transaction_hash(row, replay, card)
+    inferred_chain = _normalize_chain(security_stage.get("chain") or _infer_chain(row, replay))
+    chain_id = _parse_int(security_stage.get("chain_id")) if security_stage.get("chain_id") else _chain_id(inferred_chain)
+    seed_hash = security_stage.get("seed_transaction_hash") or _extract_seed_transaction_hash(row, replay, card)
     fork_block = _parse_int(
-        replay.get("fork_block") or card.get("fork_block") or row.get("fork_block") or row.get("replay_block")
+        alchemy_stage.get("fork_block")
+        or security_stage.get("fork_block")
+        or replay.get("fork_block")
+        or card.get("fork_block")
+        or row.get("fork_block")
+        or row.get("replay_block")
     )
-    reference = (row.get("reference_url") or card.get("reference_url") or "").strip()
-    security_sources = _security_report_sources(row, card)
+    reference = (security_stage.get("reference_url") or row.get("reference_url") or card.get("reference_url") or "").strip()
+    security_sources = _parse_json_list_cell(security_stage.get("security_report_sources")) or _security_report_sources(row, card)
     security_anchor = bool(security_sources)
-    candidate_sources = _candidate_discovery_sources(row)
-    rpc_env = _rpc_env_for_chain(inferred_chain, replay)
-    rpc_supported = _chain_rpc_supported(inferred_chain, rpc_supported_chains)
+    candidate_sources = _parse_json_list_cell(security_stage.get("candidate_discovery_sources")) or _candidate_discovery_sources(row)
+    rpc_env = alchemy_stage.get("rpc_env") or _rpc_env_for_chain(inferred_chain, replay)
+    rpc_supported = _parse_bool(alchemy_stage.get("rpc_supported")) if "rpc_supported" in alchemy_stage else _chain_rpc_supported(inferred_chain, rpc_supported_chains)
     fixture_metadata_attached = bool(replay or event_card)
     missing: list[str] = []
     if not security_anchor:
@@ -488,6 +435,7 @@ def _normalize_incident(
         "security_anchor": security_anchor,
         "rpc_env": rpc_env,
         "rpc_supported": rpc_supported,
+        "alchemy_backfill_status": alchemy_stage.get("backfill_status") or "",
         "replay_test": replay.get("replay_test") or "",
         "metadata_test": replay.get("metadata_test") or "",
         "test_path": replay.get("test_path") or "",
@@ -496,6 +444,10 @@ def _normalize_incident(
         "verified": _parse_bool(replay.get("verified")),
         "fixture_result": _fixture_result_from_replay(replay),
         "fixture_metadata_attached": fixture_metadata_attached,
+        "stage_source_artifacts": {
+            "security_evidence": bool(security_stage),
+            "alchemy_onchain_backfill": bool(alchemy_stage),
+        },
         "selected_source": "selected_incidents_csv" if row.get("incident_id") in selected_ids else "candidate_discovery",
         "description": row.get("description") or "",
         "missing_fields": missing,
@@ -504,148 +456,63 @@ def _normalize_incident(
 
 
 def _infer_chain(row: dict[str, str], replay: dict[str, str]) -> str:
-    chain = (replay.get("chain") or row.get("chain") or "").strip().lower()
-    if chain:
-        return _normalize_chain(chain)
-    text = " ".join(
-        [
-            row.get("target", ""),
-            row.get("protocol_slug_guess", ""),
-            row.get("description", ""),
-            row.get("reference_url", ""),
-        ]
-    ).lower()
-    for marker, normalized in NON_EVM_MARKERS.items():
-        if marker in text:
-            return normalized
-    if "polygon zkevm" in text or "polygon-zkevm" in text or "polygon_zkevm" in text:
-        return "polygon_zkevm"
-    if "zksync" in text or "zk sync" in text:
-        return "zksync"
-    for marker in EVM_CHAIN_IDS:
-        if marker in text:
-            return _normalize_chain(marker)
-    if any(marker in text for marker in ("bsc", "bnb chain", "pancake")):
-        return "bsc"
-    if "base" in text:
-        return "base"
-    return "ethereum"
+    return _shared_infer_chain(row, replay)
 
 
 def _normalize_chain(chain: str) -> str:
-    chain = chain.strip().lower().replace(" ", "_").replace("-", "_")
-    if chain in {"eth", "mainnet"}:
-        return "ethereum"
-    if chain in {"bnb_chain", "binance"}:
-        return "bsc"
-    if chain in {"polygon_zkevm", "polygonzkevm"}:
-        return "polygon_zkevm"
-    if chain in {"zk_sync", "zk_sync_era", "zksync_era"}:
-        return "zksync"
-    return chain
+    return _shared_normalize_chain(chain)
 
 
 def _chain_id(chain: str) -> int | None:
-    return EVM_CHAIN_IDS.get(chain)
+    return _shared_chain_id(chain)
 
 
 def _rpc_env_for_chain(chain: str, replay: dict[str, str] | None = None) -> str:
-    replay = replay or {}
-    rpc_env = str(replay.get("rpc_env") or "").strip()
-    if rpc_env:
-        return rpc_env
-    return CHAIN_RPC_ENV.get(chain, "ARCHIVE_RPC_URL")
+    return _shared_rpc_env_for_chain(chain, replay)
 
 
 def _rpc_capability_state(*, provider: str, explicit_chains: list[str] | None) -> dict[str, Any]:
-    normalized_provider = str(provider or "alchemy").strip().lower()
-    if explicit_chains is not None:
-        return {
-            "provider": normalized_provider,
-            "configured": True,
-            "configuration_sources": ["explicit_rpc_supported_chain"],
-            "supported_chains": {_normalize_chain(str(chain)) for chain in explicit_chains if str(chain).strip()},
-            "missing_configuration_error": "",
-        }
-    if normalized_provider != "alchemy":
-        return {
-            "provider": normalized_provider,
-            "configured": False,
-            "configuration_sources": [],
-            "supported_chains": set(),
-            "missing_configuration_error": f"unsupported_rpc_provider:{normalized_provider}",
-        }
-    sources = _alchemy_configuration_sources()
-    configured = bool(sources)
-    return {
-        "provider": "alchemy",
-        "configured": configured,
-        "configuration_sources": sources,
-        "supported_chains": set(ALCHEMY_SUPPORTED_CHAINS) if configured else set(),
-        "missing_configuration_error": "" if configured else "alchemy_rpc_not_configured",
-    }
-
-
-def _alchemy_configuration_sources() -> list[str]:
-    names = ("ALCHEMY_API_KEY", "ALCHEMY_RPC_URL", "ALCHEMY_MAINNET_RPC_URL", "ALCHEMY_HTTP_URL")
-    return [name for name in names if os.environ.get(name)]
+    return _shared_rpc_capability_state(provider=provider, explicit_chains=explicit_chains)
 
 
 def _chain_rpc_supported(chain: str, rpc_supported_chains: set[str]) -> bool:
-    if not rpc_supported_chains:
-        return False
-    normalized = _normalize_chain(chain)
-    if normalized == "multi_evm":
-        return any(chain in rpc_supported_chains for chain in EVM_CHAIN_IDS if chain != "multi_evm")
-    return normalized in rpc_supported_chains
+    return _shared_chain_rpc_supported(chain, rpc_supported_chains)
 
 
 def _security_report_sources(row: dict[str, str], card: dict[str, str]) -> list[dict[str, str]]:
-    reference_urls = [
-        str(row.get("reference_url") or "").strip(),
-        str(card.get("reference_url") or "").strip(),
-    ]
-    usable_reference_urls = [url for url in reference_urls if _is_security_reference_url(url)]
-    sources: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for url in usable_reference_urls:
-        host = _url_host(url)
-        for name, markers in SECURITY_REPORT_SOURCES.items():
-            if any(_marker_matches_host(marker, host) for marker in markers):
-                key = (name, url)
-                if key not in seen:
-                    sources.append({"source": name, "url": url})
-                    seen.add(key)
-    return sources
+    return _shared_security_report_sources(row, card)
 
 
 def _candidate_discovery_sources(row: dict[str, str]) -> list[dict[str, str]]:
-    source_url = str(row.get("source_url") or "").strip()
-    if "hacked.slowmist.io" in source_url.lower():
-        return [{"source": "slowmist_hacked", "url": source_url, "role": "candidate_discovery"}]
-    return []
+    return _shared_candidate_discovery_sources(row)
+
+
+def _parse_json_list_cell(value: str | None) -> list[dict[str, str]]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    rows: list[dict[str, str]] = []
+    for item in parsed:
+        if isinstance(item, dict):
+            rows.append({str(key): str(val) for key, val in item.items()})
+    return rows
 
 
 def _is_security_reference_url(url: str) -> bool:
-    text = url.strip().lower()
-    if not text:
-        return False
-    if "hacked.slowmist.io" in text and ("?c=" in text or "page=" in text):
-        return False
-    return True
+    return _shared_is_security_reference_url(url)
 
 
 def _url_host(url: str) -> str:
-    parsed = urlparse(url)
-    host = parsed.netloc or parsed.path.split("/", 1)[0]
-    return host.lower().removeprefix("www.")
+    return _shared_url_host(url)
 
 
 def _marker_matches_host(marker: str, host: str) -> bool:
-    marker_text = marker.lower().removeprefix("www.")
-    if "." in marker_text:
-        return host == marker_text or host.endswith(f".{marker_text}")
-    return host == marker_text or host.startswith(f"{marker_text}.")
+    return _shared_marker_matches_host(marker, host)
 
 
 def _extract_seed_transaction_hash(
@@ -817,6 +684,7 @@ def _stage_ledger_payload(
     cases: list[dict[str, Any]],
     selected_ids: set[str],
     exclusion_reasons: dict[str, str],
+    source_stage_artifacts: dict[str, str],
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     for case in cases:
@@ -850,6 +718,7 @@ def _stage_ledger_payload(
         "schema_version": STAGE_LEDGER_SCHEMA_VERSION,
         "generated_at": generated_at,
         "stage_order": list(STAGE_ORDER),
+        "source_stage_artifacts": source_stage_artifacts,
         "summary": _stage_ledger_summary(cases, selected_ids, exclusion_reasons),
         "entries": sorted(entries, key=lambda entry: (entry["selection_status"], entry["slug"])),
     }

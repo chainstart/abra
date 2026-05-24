@@ -19,6 +19,7 @@ entrypoints:
     - python3 tools/scanner.py
     - python3 tools/replay_runner.py
     - python3 tools/pipeline/run_phase1.py
+    - python3 -m abra evidence produce
 
 commands:
   allow_prefixes:
@@ -70,6 +71,20 @@ dispatch:
         - --json
       side_effect_free: true
       description: List ABRA's preserved domain tools.
+    evidence-produce:
+      argv:
+        - python3
+        - -m
+        - abra
+        - evidence
+        - produce
+        - --incidents-csv
+        - data/processed/incidents_normalized_latest.csv
+        - --out-dir
+        - data/processed
+        - --json
+      side_effect_free: false
+      description: Produce staged security-evidence enrichment and Alchemy backfill artifacts.
     agent-run-fixture:
       argv:
         - python3
@@ -121,6 +136,8 @@ artifacts:
     - runs/*/abra_research_agent_bundle/**
     - data/processed/*.csv
     - data/processed/*.json
+    - data/raw/defillama/defillama_hacks_latest.csv
+    - data/raw/defillama/defillama_hacks_latest.json
     - reports/*.md
     - reports/events/*.md
     - reports/replay_runs/*.json

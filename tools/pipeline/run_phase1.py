@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the full Phase-1 pipeline: collect -> normalize -> quality report."""
+"""Run Phase 1: collect candidates -> normalize -> enrich evidence -> quality report."""
 
 from __future__ import annotations
 
@@ -62,8 +62,23 @@ def main() -> None:
         "data/raw/slowmist/slowmist_events_latest.csv",
         "--defillama-protocols-csv",
         "data/raw/defillama/defillama_protocols_slim_latest.csv",
+        "--defillama-hacks-csv",
+        "data/raw/defillama/defillama_hacks_latest.csv",
         "--output-dir",
         "data/processed",
+    ]
+
+    evidence_cmd = [
+        py,
+        "-m",
+        "abra",
+        "evidence",
+        "produce",
+        "--incidents-csv",
+        "data/processed/incidents_normalized_latest.csv",
+        "--out-dir",
+        "data/processed",
+        "--json",
     ]
 
     dq_cmd = [
@@ -80,6 +95,7 @@ def main() -> None:
     run_cmd(slowmist_cmd, cwd=repo_root)
     run_cmd(defillama_cmd, cwd=repo_root)
     run_cmd(normalize_cmd, cwd=repo_root)
+    run_cmd(evidence_cmd, cwd=repo_root)
     run_cmd(dq_cmd, cwd=repo_root)
     print("[phase1] pipeline completed.")
 

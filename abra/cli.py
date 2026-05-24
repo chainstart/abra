@@ -10,6 +10,7 @@ from typing import Any
 from abra import __version__
 from abra.agent import run_research_agent
 from abra.bundle import build_result_bundle, validate_result_bundle
+from abra.evidence_pipeline import produce_evidence_pipeline
 from abra.manifest import load_manifest
 from abra.replay_agent import assess_replay_fixture, validate_evidence_bundle
 from abra.replay_cohort_assessment import assess_replay_cohort
@@ -178,8 +179,35 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_assess_cohort.add_argument("--min-level", default="L1", help="Minimum evidence level for per-case validation.")
     replay_assess_cohort.add_argument("--json", action="store_true", help="Print JSON output.")
 
-    evidence = subparsers.add_parser("evidence", help="Validate ABRA evidence bundles.")
+    evidence = subparsers.add_parser("evidence", help="Produce and validate ABRA evidence artifacts.")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
+
+    evidence_produce = evidence_sub.add_parser(
+        "produce",
+        help="Materialize staged incident security enrichment and Alchemy backfill artifacts.",
+    )
+    evidence_produce.add_argument(
+        "--incidents-csv",
+        default="data/processed/incidents_normalized_latest.csv",
+        help="Normalized incident CSV produced by the ABRA phase-1 pipeline.",
+    )
+    evidence_produce.add_argument(
+        "--out-dir",
+        default="data/processed",
+        help="Directory for security_evidence_enriched_latest.* and alchemy_onchain_backfill_latest.*.",
+    )
+    evidence_produce.add_argument(
+        "--rpc-provider",
+        default="alchemy",
+        help="RPC capability provider used for chain support filtering. Defaults to Alchemy.",
+    )
+    evidence_produce.add_argument(
+        "--rpc-supported-chain",
+        action="append",
+        dest="rpc_supported_chains",
+        help="Explicitly allow a chain for deterministic tests or offline runs. Repeatable.",
+    )
+    evidence_produce.add_argument("--json", action="store_true", help="Print JSON output.")
 
     evidence_validate = evidence_sub.add_parser("validate", help="Validate an ABRA evidence bundle directory.")
     evidence_validate.add_argument("bundle_path", help="Path to a bundle containing evidence_bundle.json.")
@@ -289,6 +317,16 @@ def _handle_replay(args: argparse.Namespace) -> int:
 
 
 def _handle_evidence(args: argparse.Namespace) -> int:
+    if args.evidence_command == "produce":
+        payload = produce_evidence_pipeline(
+            incidents_csv=args.incidents_csv,
+            out_dir=args.out_dir,
+            rpc_provider=args.rpc_provider,
+            rpc_supported_chains=args.rpc_supported_chains,
+        )
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
     if args.evidence_command == "validate":
         payload = validate_evidence_bundle(args.bundle_path, args.min_level)
         _emit(payload, args.json)

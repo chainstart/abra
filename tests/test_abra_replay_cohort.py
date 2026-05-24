@@ -152,6 +152,8 @@ def test_replay_cohort_builds_manifest_exclusion_log_and_case_files(tmp_path):
     case_files = sorted((out / "cases").glob("*.json"))
 
     assert manifest["schema_version"] == "abra.replay_cohort.manifest.v1"
+    assert manifest["security_evidence_csv"].endswith("security_evidence_enriched_latest.csv")
+    assert manifest["alchemy_backfill_csv"].endswith("alchemy_onchain_backfill_latest.csv")
     assert manifest["case_count"] == 12
     assert manifest["stage_order"] == [
         "candidate_discovery",
@@ -171,6 +173,10 @@ def test_replay_cohort_builds_manifest_exclusion_log_and_case_files(tmp_path):
     )
     assert all((out / case["case_file"]).exists() for case in manifest["cases"])
     assert stage_ledger["schema_version"] == "abra.replay_cohort.stage_ledger.v1"
+    assert stage_ledger["source_stage_artifacts"] == {
+        "security_evidence_csv": str(incidents_csv.parent / "security_evidence_enriched_latest.csv"),
+        "alchemy_backfill_csv": str(incidents_csv.parent / "alchemy_onchain_backfill_latest.csv"),
+    }
     assert stage_ledger["stage_order"] == manifest["stage_order"]
     assert stage_ledger["summary"]["candidate_discovery_count"] == 15
     assert stage_ledger["summary"]["security_evidence_enriched_count"] == 14

@@ -12,14 +12,13 @@ from pathlib import Path
 from typing import Any
 
 
-ARA_ROOT = Path(os.environ.get("ARA_REPO", "/home/biostar/work/projects/ara"))
 SCHEMA_VERSION = "abra.ara_contract_smoke.v1"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle_path", help="ABRA bundle directory to validate with public ARA.")
-    parser.add_argument("--ara-root", default=str(ARA_ROOT), help="Path to the public ARA repository.")
+    parser.add_argument("--ara-root", default=str(discover_default_ara_root()), help="Path to the public ARA repository.")
     parser.add_argument("--json", action="store_true", help="Print JSON output.")
     args = parser.parse_args(argv)
 
@@ -28,6 +27,25 @@ def main(argv: list[str] | None = None) -> int:
     result = validate_with_ara(bundle_path, ara_root)
     _emit(result, args.json)
     return 0 if result["status"] == "passed" else 1
+
+
+def discover_default_ara_root() -> Path:
+    """Resolve the ARA checkout from env, sibling layout, or legacy default."""
+
+    env_root = os.environ.get("ARA_REPO")
+    if env_root:
+        return Path(env_root).expanduser()
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2] / "auto-research-agent",
+        here.parents[1].parent / "auto-research-agent",
+        here.parents[1],
+        Path("/home/biostar/work/projects/ara"),
+    ]
+    for candidate in candidates:
+        if (candidate / "ara" / "__init__.py").exists():
+            return candidate
+    return candidates[0]
 
 
 def validate_with_ara(bundle_path: Path, ara_root: Path) -> dict[str, Any]:

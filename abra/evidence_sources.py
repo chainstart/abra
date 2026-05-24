@@ -1,0 +1,96 @@
+"""Shared ABRA event-source and security-evidence classification."""
+
+from __future__ import annotations
+
+from urllib.parse import urlparse
+
+
+SECURITY_REPORT_SOURCES = {
+    "slowmist": ("slowmist.io", "slowmist_team"),
+    "certik": ("certik.com",),
+    "peckshield": ("peckshield", "peckshield.com"),
+    "blocksec": ("blocksec", "blocksec.com"),
+    "beosin": ("beosin", "beosin.com"),
+    "rekt": ("rekt.news",),
+    "immunefi": ("immunefi.com",),
+    "chainsecurity": ("chainsecurity.com",),
+    "openzeppelin": ("openzeppelin.com",),
+}
+
+
+def candidate_discovery_sources(row: dict[str, str]) -> list[dict[str, str]]:
+    """Return public candidate feeds only; these are not security anchors."""
+
+    source_url = str(row.get("source_url") or "").strip()
+    source_lower = source_url.lower()
+    sources: list[dict[str, str]] = []
+    if "hacked.slowmist.io" in source_lower:
+        sources.append({"source": "slowmist_hacked", "url": source_url, "role": "candidate_discovery"})
+    if "defillama.com/hacks" in source_lower or "api.llama.fi/hacks" in source_lower:
+        sources.append({"source": "defillama_hacks", "url": source_url, "role": "candidate_discovery"})
+    return sources
+
+
+def security_report_sources(row: dict[str, str], card: dict[str, str] | None = None) -> list[dict[str, str]]:
+    """Return URL-host anchored security/public reports, never text-only mentions."""
+
+    card = card or {}
+    reference_urls = [
+        str(row.get("reference_url") or "").strip(),
+        str(card.get("reference_url") or "").strip(),
+    ]
+    usable_reference_urls = [url for url in reference_urls if is_security_reference_url(url)]
+    sources: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for url in usable_reference_urls:
+        host = url_host(url)
+        for name, markers in SECURITY_REPORT_SOURCES.items():
+            if any(marker_matches_host(marker, host) for marker in markers):
+                key = (name, url)
+                if key not in seen:
+                    sources.append({"source": name, "url": url})
+                    seen.add(key)
+    return sources
+
+
+def text_only_security_mentions_ignored(row: dict[str, str], card: dict[str, str] | None = None) -> bool:
+    """Detect cases where security firms are mentioned without an anchored source URL."""
+
+    if security_report_sources(row, card):
+        return False
+    haystack = " ".join(
+        [
+            str(row.get("description") or ""),
+            str(row.get("target") or ""),
+            str(row.get("attack_method_raw") or ""),
+        ]
+    ).lower()
+    for name, markers in SECURITY_REPORT_SOURCES.items():
+        if name in haystack:
+            return True
+        for marker in markers:
+            if "." not in marker and marker.lower() in haystack:
+                return True
+    return False
+
+
+def is_security_reference_url(url: str) -> bool:
+    text = url.strip().lower()
+    if not text:
+        return False
+    if "hacked.slowmist.io" in text and ("?c=" in text or "page=" in text):
+        return False
+    return True
+
+
+def url_host(url: str) -> str:
+    parsed = urlparse(url)
+    host = parsed.netloc or parsed.path.split("/", 1)[0]
+    return host.lower().removeprefix("www.")
+
+
+def marker_matches_host(marker: str, host: str) -> bool:
+    marker_text = marker.lower().removeprefix("www.")
+    if "." in marker_text:
+        return host == marker_text or host.endswith(f".{marker_text}")
+    return host == marker_text or host.startswith(f"{marker_text}.")
