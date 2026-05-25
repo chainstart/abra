@@ -14,7 +14,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
 
 from abra.chain_support import (
     chain_id,
@@ -101,6 +101,8 @@ SourceFetcher = Callable[[str], dict[str, str]]
 RpcCaller = Callable[[str, str, list[str]], dict[str, Any]]
 AnchorSearcher = Callable[[dict[str, str]], list[dict[str, str]]]
 
+_TWITTERAPI_IO_REQUEST_COUNT = 0
+
 
 def produce_evidence_pipeline(
     *,
@@ -114,6 +116,7 @@ def produce_evidence_pipeline(
 ) -> dict[str, Any]:
     """Write explicit candidate enrichment and Alchemy backfill stage products."""
 
+    _reset_twitterapi_io_request_budget()
     root = repo_root()
     load_local_environment(root)
     incidents_path = _resolve_repo_path(root, incidents_csv)
@@ -419,6 +422,20 @@ def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[d
         "anchor_discovery_exhausted_count": sum(
             1 for row in backfill_rows if str(row.get("anchor_discovery_status") or "").startswith("anchor_discovery_search_exhausted")
         ),
+        "x_source_fetch_exhausted_count": sum(
+            1
+            for row in backfill_rows
+            if str(row.get("source_fetch_status") or "")
+            in {
+                "twitterapi_io_budget_exhausted",
+                "twitterapi_io_not_configured",
+                "twitterapi_io_http_429",
+                "twitterapi_io_no_tweet",
+                "twitterapi_io_empty_tweet",
+            }
+            and not row.get("seed_transaction_hash")
+            and not row.get("fork_block")
+        ),
         "onchain_anchor_complete_count": sum(
             1 for row in backfill_rows if row.get("seed_transaction_hash") and row.get("fork_block")
         ),
@@ -441,6 +458,8 @@ def _evidence_quality_errors(backfill_summary: dict[str, int]) -> list[str]:
         errors.append("anchor_discovery_attempted_without_onchain_anchor")
     if attempted and results and timeouts == results:
         errors.append("anchor_discovery_all_attempts_timed_out")
+    if backfill_summary.get("x_source_fetch_exhausted_count", 0) > 0 and complete == 0:
+        errors.append("x_source_fetch_exhausted_without_onchain_anchor")
     return errors
 
 
@@ -604,7 +623,7 @@ def _extract_onchain_anchor_from_security_sources(
             last_status = f"source_fetch_failed:{exc.__class__.__name__}"
             continue
         status = str(fetched.get("status") or "fetched")
-        if status != "fetched":
+        if not _source_fetch_status_is_success(status):
             last_status = status
             continue
         text = str(fetched.get("text") or "")
@@ -625,6 +644,10 @@ def _extract_onchain_anchor_from_security_sources(
         "source_extracted_seed_transaction_hash": "",
         "source_extracted_block": "",
     }
+
+
+def _source_fetch_status_is_success(status: str) -> bool:
+    return status in {"fetched", "twitterapi_io_fetched"}
 
 
 def _discover_onchain_anchor(
@@ -1158,7 +1181,7 @@ def _dedupe_strings(values: list[str]) -> list[str]:
 
 def fetch_security_source_text(url: str) -> dict[str, str]:
     if _requires_specialized_social_fetch(url):
-        return {"status": "source_fetch_skipped:social_api_required", "url": url, "text": ""}
+        return fetch_x_security_source_text(url)
     if os.environ.get("ABRA_EVIDENCE_SOURCE_FETCH", "").strip().lower() in {"0", "false", "no", "off"}:
         return {"status": "source_fetch_skipped:disabled", "url": url, "text": ""}
     request = urllib.request.Request(
@@ -1180,6 +1203,167 @@ def fetch_security_source_text(url: str) -> dict[str, str]:
         return {"status": f"source_fetch_failed:{reason_name}", "url": url, "text": ""}
     text = raw.decode("utf-8", errors="replace")
     return {"status": "fetched", "url": url, "content_type": content_type, "text": text}
+
+
+def fetch_x_security_source_text(url: str) -> dict[str, str]:
+    tweet_id = _tweet_id_from_url(url)
+    if not tweet_id:
+        return {"status": "twitterapi_io_invalid_x_url", "url": url, "text": ""}
+    api_key = os.environ.get("TWITTERAPI_IO_KEY", "").strip()
+    if not api_key:
+        return {"status": "twitterapi_io_not_configured", "url": url, "text": ""}
+
+    cached = _read_twitterapi_io_cache(tweet_id)
+    if cached is not None:
+        return _twitterapi_io_payload_to_source_text(cached, url=url, cache_status="hit")
+    if not _claim_twitterapi_io_request_budget():
+        return {"status": "twitterapi_io_budget_exhausted", "url": url, "text": ""}
+
+    request_url = f"https://api.twitterapi.io/twitter/tweets?tweet_ids={quote(tweet_id, safe='')}"
+    request = urllib.request.Request(
+        request_url,
+        headers={
+            "User-Agent": "ABRA/1.0 twitterapi-io-x-source (+https://github.com/chainstart/abra)",
+            "Accept": "application/json",
+            "X-API-Key": api_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_twitterapi_io_timeout_seconds()) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"status": f"twitterapi_io_http_{exc.code}", "url": url, "text": ""}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {"status": f"twitterapi_io_failed:{reason_name}", "url": url, "text": ""}
+    except OSError as exc:
+        return {"status": f"twitterapi_io_failed:{exc.__class__.__name__}", "url": url, "text": ""}
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {"status": "twitterapi_io_invalid_json", "url": url, "text": ""}
+    _write_twitterapi_io_cache(tweet_id, payload)
+    return _twitterapi_io_payload_to_source_text(payload, url=url, cache_status="miss")
+
+
+def _twitterapi_io_payload_to_source_text(payload: dict[str, Any], *, url: str, cache_status: str) -> dict[str, str]:
+    tweets = payload.get("tweets")
+    if not isinstance(tweets, list) or not tweets:
+        return {"status": "twitterapi_io_no_tweet", "url": url, "text": "", "cache": cache_status}
+    text_parts: list[str] = []
+    evidence_url = url
+    for tweet in tweets:
+        if not isinstance(tweet, dict):
+            continue
+        evidence_url = str(tweet.get("url") or evidence_url)
+        text_parts.append(str(tweet.get("text") or ""))
+        text_parts.extend(_twitterapi_io_entity_urls(tweet))
+    text = html.unescape("\n".join(part for part in text_parts if part))
+    if not text:
+        return {"status": "twitterapi_io_empty_tweet", "url": evidence_url, "text": "", "cache": cache_status}
+    return {
+        "status": "twitterapi_io_fetched",
+        "url": evidence_url,
+        "content_type": "application/json",
+        "cache": cache_status,
+        "text": text,
+    }
+
+
+def _twitterapi_io_entity_urls(tweet: dict[str, Any]) -> list[str]:
+    entities = tweet.get("entities")
+    if not isinstance(entities, dict):
+        return []
+    urls = entities.get("urls")
+    if not isinstance(urls, list):
+        return []
+    extracted: list[str] = []
+    for item in urls:
+        if isinstance(item, str):
+            extracted.append(item)
+        elif isinstance(item, dict):
+            for key in ("expanded_url", "expandedUrl", "url", "display_url", "displayUrl"):
+                value = str(item.get(key) or "").strip()
+                if value:
+                    extracted.append(value)
+                    break
+    return extracted
+
+
+def _tweet_id_from_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host not in {"x.com", "twitter.com"}:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(parts):
+        if part.lower() == "status" and index + 1 < len(parts):
+            candidate = parts[index + 1]
+            return candidate if candidate.isdigit() else ""
+    return ""
+
+
+def _twitterapi_io_cache_dir() -> Path | None:
+    raw = os.environ.get("ABRA_TWITTERAPI_IO_CACHE_DIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _read_twitterapi_io_cache(tweet_id: str) -> dict[str, Any] | None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return None
+    path = cache_dir / f"{tweet_id}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_twitterapi_io_cache(tweet_id: str, payload: dict[str, Any]) -> None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{tweet_id}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _twitterapi_io_timeout_seconds() -> float:
+    try:
+        return max(0.5, float(os.environ.get("ABRA_TWITTERAPI_IO_TIMEOUT_SECONDS", "10")))
+    except ValueError:
+        return 10.0
+
+
+def _twitterapi_io_max_requests() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_TWITTERAPI_IO_MAX_REQUESTS", "5")))
+    except ValueError:
+        return 5
+
+
+def _reset_twitterapi_io_request_budget() -> None:
+    global _TWITTERAPI_IO_REQUEST_COUNT
+    _TWITTERAPI_IO_REQUEST_COUNT = 0
+
+
+def _claim_twitterapi_io_request_budget() -> bool:
+    global _TWITTERAPI_IO_REQUEST_COUNT
+    if _TWITTERAPI_IO_REQUEST_COUNT >= _twitterapi_io_max_requests():
+        return False
+    _TWITTERAPI_IO_REQUEST_COUNT += 1
+    return True
 
 
 def _requires_specialized_social_fetch(url: str) -> bool:

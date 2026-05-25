@@ -543,7 +543,7 @@ def test_evidence_pipeline_does_not_live_fetch_generic_reference_pages_without_t
     assert rows[0]["backfill_status"] == "missing_onchain_anchor"
 
 
-def test_evidence_pipeline_skips_default_live_fetch_for_social_alert_urls(tmp_path, monkeypatch):
+def test_evidence_pipeline_reports_missing_twitterapi_io_key_for_default_x_alert_fetch(tmp_path, monkeypatch):
     monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
     incidents_csv = tmp_path / "incidents_normalized_latest.csv"
     out_dir = tmp_path / "processed"
@@ -571,7 +571,7 @@ def test_evidence_pipeline_skips_default_live_fetch_for_social_alert_urls(tmp_pa
     assert len(rows) == 1
     assert rows[0]["security_anchor"] == "true"
     assert rows[0]["backfill_status"] == "missing_onchain_anchor"
-    assert rows[0]["source_fetch_status"] == "source_fetch_skipped:social_api_required"
+    assert rows[0]["source_fetch_status"] == "twitterapi_io_not_configured"
     assert rows[0]["source_evidence_url"] == ""
     assert rows[0]["rpc_backfill_status"] == "not_attempted"
 
@@ -1162,6 +1162,272 @@ def test_evidence_pipeline_can_disable_live_security_source_fetch(tmp_path, monk
     assert len(rows) == 1
     assert rows[0]["source_fetch_status"] == "source_fetch_skipped:disabled"
     assert rows[0]["rpc_backfill_status"] == "not_attempted"
+
+
+def test_evidence_pipeline_fetches_x_alert_text_with_twitterapi_io(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "twitterapi-test-key")
+    tx_hash = "0x" + "6" * 64
+    alert_url = "https://x.com/blockaid_/status/2054593377438421492"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="TwitterAPI Alert Candidate",
+                reference_url=alert_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "status": "success",
+                    "tweets": [
+                        {
+                            "id": "2054593377438421492",
+                            "url": alert_url,
+                            "text": f"Exploit transaction: https://arbiscan.io/tx/{tx_hash}",
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        }
+                    ],
+                }
+            ).encode()
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        requested_urls.append(request.full_url)
+        assert request.headers["X-api-key"] == "twitterapi-test-key"
+        assert request.full_url == "https://api.twitterapi.io/twitter/tweets?tweet_ids=2054593377438421492"
+        return FakeResponse()
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_011)}
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert requested_urls == ["https://api.twitterapi.io/twitter/tweets?tweet_ids=2054593377438421492"]
+    assert rows[0]["source_fetch_status"] == "twitterapi_io_fetched"
+    assert rows[0]["source_evidence_url"] == alert_url
+    assert rows[0]["source_extracted_seed_transaction_hash"] == tx_hash
+    assert rows[0]["seed_transaction_hash"] == tx_hash
+    assert rows[0]["fork_block"] == "20000011"
+    assert rows[0]["rpc_backfill_status"] == "receipt_verified"
+
+
+def test_evidence_pipeline_reports_missing_twitterapi_io_key_for_x_alerts(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.delenv("TWITTERAPI_IO_KEY", raising=False)
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="TwitterAPI Missing Key Candidate",
+                reference_url="https://x.com/SlowMist_Team/status/2054163700035289446",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fail_if_network_called(*_args, **_kwargs):
+        raise AssertionError("TwitterAPI.io should not be called without TWITTERAPI_IO_KEY")
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fail_if_network_called)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert rows[0]["source_fetch_status"] == "twitterapi_io_not_configured"
+    assert rows[0]["source_extracted_seed_transaction_hash"] == ""
+    assert rows[0]["rpc_backfill_status"] == "not_attempted"
+
+
+def test_evidence_pipeline_uses_twitterapi_io_cache_for_x_alerts(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "twitterapi-test-key")
+    monkeypatch.setenv("ABRA_TWITTERAPI_IO_CACHE_DIR", str(tmp_path / "twitterapi-cache"))
+    tx_hash = "0x" + "7" * 64
+    tweet_id = "2054163700035289446"
+    alert_url = f"https://x.com/SlowMist_Team/status/{tweet_id}"
+    cache_dir = tmp_path / "twitterapi-cache"
+    cache_dir.mkdir()
+    (cache_dir / f"{tweet_id}.json").write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "tweets": [
+                    {
+                        "id": tweet_id,
+                        "url": alert_url,
+                        "text": f"Attack tx hash {tx_hash}",
+                        "author": {"userName": "SlowMist_Team"},
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="TwitterAPI Cache Candidate",
+                reference_url=alert_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    def fail_if_network_called(*_args, **_kwargs):
+        raise AssertionError("cached TwitterAPI.io tweet should not call the network")
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fail_if_network_called)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        rpc_caller=lambda *_args: {"blockNumber": hex(20_000_012)},
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert rows[0]["source_fetch_status"] == "twitterapi_io_fetched"
+    assert rows[0]["source_extracted_seed_transaction_hash"] == tx_hash
+    assert rows[0]["fork_block"] == "20000012"
+
+
+def test_evidence_pipeline_bounds_twitterapi_io_requests(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "twitterapi-test-key")
+    monkeypatch.setenv("ABRA_TWITTERAPI_IO_MAX_REQUESTS", "1")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="TwitterAPI Budget Candidate One",
+                reference_url="https://x.com/blockaid_/status/2054593377438421492",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+            _incident(
+                2,
+                target="TwitterAPI Budget Candidate Two",
+                reference_url="https://x.com/SlowMist_Team/status/2054163700035289446",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps({"status": "success", "tweets": [{"text": "no tx"}]}).encode()
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        requested_urls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert len(requested_urls) == 1
+    assert rows[0]["source_fetch_status"] == "fetched_no_onchain_anchor"
+    assert rows[1]["source_fetch_status"] == "twitterapi_io_budget_exhausted"
+
+
+def test_evidence_pipeline_fails_when_twitterapi_io_is_exhausted_without_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "twitterapi-test-key")
+    monkeypatch.setenv("ABRA_TWITTERAPI_IO_MAX_REQUESTS", "0")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="TwitterAPI Exhausted Candidate",
+                reference_url="https://x.com/blockaid_/status/2054593377438421492",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    payload = produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert rows[0]["source_fetch_status"] == "twitterapi_io_budget_exhausted"
+    assert payload["status"] == "failed"
+    assert "x_source_fetch_exhausted_without_onchain_anchor" in payload["errors"]
+    assert payload["summary"]["x_source_fetch_exhausted_count"] == 1
 
 
 def test_alchemy_rpc_url_derivation_prefers_unified_api_key_over_legacy_rpc_env(monkeypatch):
