@@ -76,7 +76,9 @@ def security_report_sources(row: dict[str, str], card: dict[str, str] | None = N
     card = card or {}
     reference_urls = [
         str(row.get("reference_url") or "").strip(),
+        str(row.get("direct_evidence_reference_url") or "").strip(),
         str(card.get("reference_url") or "").strip(),
+        str(card.get("direct_evidence_reference_url") or "").strip(),
     ]
     usable_reference_urls = [url for url in reference_urls if is_security_reference_url(url)]
     sources: list[dict[str, str]] = []

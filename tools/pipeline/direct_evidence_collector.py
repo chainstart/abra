@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed, wait
 from functools import lru_cache
 import json
 import os
@@ -35,6 +35,7 @@ GITHUB_API_VERSION = "2022-11-28"
 DEFAULT_DIRECT_EVIDENCE_WORKERS = 16
 DEFAULT_GITHUB_API_TIMEOUT_SECONDS = 30.0
 DEFAULT_GITHUB_RAW_TIMEOUT_SECONDS = 5.0
+DEFAULT_RATE_LIMIT_GRACE_SECONDS = 0.25
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
@@ -223,7 +224,9 @@ def _collect_defihacklabs_rows(*, max_fixtures: int) -> tuple[list[dict[str, str
             return rows, "rate_limited", _format_rate_limit_warning(exc, DEFIHACKLABS_TREE_URL)
         raise
 
-    fixture_paths = [str(item.get("path") or "") for item in items if _is_defihacklabs_exploit_fixture(str(item.get("path") or ""))]
+    fixture_paths = _prioritized_defihacklabs_fixture_paths(
+        [str(item.get("path") or "") for item in items if _is_defihacklabs_exploit_fixture(str(item.get("path") or ""))]
+    )
     workers = _direct_evidence_workers()
     cursor = 0
 
@@ -251,29 +254,86 @@ def _collect_defihacklabs_batch(
     max_rows: int,
     workers: int,
 ) -> tuple[list[dict[str, str]], str, str]:
-    rows: list[dict[str, str]] = []
     if not paths or max_rows <= 0:
-        return rows, "complete", ""
+        return [], "complete", ""
 
     with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
         future_entries = [(path, executor.submit(fetch_defihacklabs_fixture, path)) for path in paths]
-        for path, future in future_entries:
+        future_paths = {future: path for path, future in future_entries}
+        consumed: set[Future[dict[str, str]]] = set()
+        parsed_by_path: dict[str, dict[str, str]] = {}
+        for future in as_completed(future_paths):
+            path = future_paths[future]
+            consumed.add(future)
             try:
                 fixture = future.result()
             except HTTPError as exc:
                 if _is_github_rate_limit_error(exc):
+                    pending = [pending_future for _pending_path, pending_future in future_entries if not pending_future.done()]
+                    wait(pending, timeout=_rate_limit_grace_seconds())
                     for _pending_path, pending_future in future_entries:
                         pending_future.cancel()
-                    return rows, "rate_limited", _format_rate_limit_warning(exc, path)
+                    parsed_by_path.update(
+                        _completed_defihacklabs_rows(
+                            future_entries,
+                            consumed_futures=consumed,
+                        )
+                    )
+                    return (
+                        _ordered_parsed_defihacklabs_rows(paths, parsed_by_path, max_rows=max_rows),
+                        "rate_limited",
+                        _format_rate_limit_warning(exc, path),
+                    )
                 raise
             parsed = _parse_defihacklabs_fixture(fixture)
             if parsed:
-                rows.append(parsed)
-                if len(rows) >= max_rows:
-                    for _pending_path, pending_future in future_entries:
-                        pending_future.cancel()
-                    break
-    return rows, "complete", ""
+                parsed_by_path[path] = parsed
+    return _ordered_parsed_defihacklabs_rows(paths, parsed_by_path, max_rows=max_rows), "complete", ""
+
+
+def _ordered_parsed_defihacklabs_rows(
+    paths: list[str],
+    parsed_by_path: dict[str, dict[str, str]],
+    *,
+    max_rows: int,
+) -> list[dict[str, str]]:
+    return [parsed_by_path[path] for path in paths if path in parsed_by_path][:max_rows]
+
+
+def _completed_defihacklabs_rows(
+    future_entries: list[tuple[str, Future[dict[str, str]]]],
+    *,
+    consumed_futures: set[Future[dict[str, str]]],
+    ) -> dict[str, dict[str, str]]:
+    parsed_by_path: dict[str, dict[str, str]] = {}
+    for path, future in future_entries:
+        if future in consumed_futures or not future.done() or future.cancelled():
+            continue
+        try:
+            fixture = future.result()
+        except HTTPError:
+            continue
+        parsed = _parse_defihacklabs_fixture(fixture)
+        if parsed:
+            parsed_by_path[path] = parsed
+    return parsed_by_path
+
+
+def _rate_limit_grace_seconds() -> float:
+    return _timeout_from_env("ABRA_DIRECT_EVIDENCE_RATE_LIMIT_GRACE_SECONDS", DEFAULT_RATE_LIMIT_GRACE_SECONDS)
+
+
+def _prioritized_defihacklabs_fixture_paths(paths: list[str]) -> list[str]:
+    """Prefer recent replay fixtures so bounded Phase-1 runs enrich current incident cohorts."""
+
+    return sorted(paths, key=_defihacklabs_fixture_sort_key, reverse=True)
+
+
+def _defihacklabs_fixture_sort_key(path: str) -> tuple[str, str]:
+    match = re.fullmatch(r"src/test/(\d{4}-\d{2})/([^/]+)_exp\.sol", path)
+    if not match:
+        return ("", path)
+    return (match.group(1), match.group(2).lower())
 
 
 def _direct_evidence_workers() -> int:

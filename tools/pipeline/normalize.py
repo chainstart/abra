@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 from common import (
@@ -53,6 +54,14 @@ GENERIC_PROTOCOL_TOKENS = {
     "labs",
     "chain",
     "market",
+}
+
+EVIDENCE_MATCH_STOPWORDS = GENERIC_PROTOCOL_TOKENS | {
+    "the",
+    "and",
+    "for",
+    "of",
+    "mainnet",
 }
 
 
@@ -201,6 +210,8 @@ def normalize_datasets(
     protocols_rows = read_csv(defillama_protocols_csv)
 
     entries, token_index, exact_norm = build_protocol_index(protocols_rows)
+    direct_evidence_index = build_direct_evidence_index(direct_evidence_rows, entries, token_index, exact_norm)
+    matched_direct_evidence_ids: set[str] = set()
 
     normalized_incidents = []
     for row in slowmist_rows:
@@ -212,6 +223,9 @@ def normalize_datasets(
         loss_val = parse_loss_usd(loss_raw)
         family = classify_attack_family(attack_method, description)
         defi_flag = is_defi_event(target, description, attack_method, protocol_slug)
+        direct_evidence = best_direct_evidence_match(row, direct_evidence_index, protocol_slug)
+        if direct_evidence:
+            matched_direct_evidence_ids.add(direct_evidence.get("incident_id", ""))
 
         normalized_incidents.append(
             {
@@ -224,13 +238,14 @@ def normalize_datasets(
                 "attack_family": family,
                 "loss_usd_raw": loss_raw,
                 "loss_usd": "" if loss_val is None else f"{loss_val:.2f}",
-                "chain": "",
+                "chain": direct_evidence.get("chain", "") if direct_evidence else "",
                 "reference_url": row.get("reference_url", ""),
+                "direct_evidence_reference_url": direct_evidence.get("reference_url", "") if direct_evidence else "",
                 "source_url": row.get("source_url", ""),
                 "source_page": row.get("source_page", ""),
                 "category_filter": row.get("category_filter", ""),
-                "seed_transaction_hash": row.get("seed_transaction_hash", ""),
-                "fork_block": row.get("fork_block", ""),
+                "seed_transaction_hash": row.get("seed_transaction_hash", "") or (direct_evidence.get("seed_transaction_hash", "") if direct_evidence else ""),
+                "fork_block": row.get("fork_block", "") or (direct_evidence.get("fork_block", "") if direct_evidence else ""),
                 "description": description,
                 "normalized_at": now_utc_iso(),
             }
@@ -243,6 +258,9 @@ def normalize_datasets(
         loss_val = parse_loss_usd(str(row.get("loss_usd_raw") or row.get("loss_usd") or ""))
         family = classify_attack_family(attack_method or row.get("classification", ""), description)
         defi_flag = is_defi_event(target, description, attack_method, protocol_slug) or _is_defillama_defi_hack(row)
+        direct_evidence = best_direct_evidence_match(row, direct_evidence_index, protocol_slug)
+        if direct_evidence:
+            matched_direct_evidence_ids.add(direct_evidence.get("incident_id", ""))
         normalized_incidents.append(
             {
                 "incident_id": row.get("incident_id", ""),
@@ -254,18 +272,21 @@ def normalize_datasets(
                 "attack_family": family,
                 "loss_usd_raw": row.get("loss_usd_raw", ""),
                 "loss_usd": "" if loss_val is None else f"{loss_val:.2f}",
-                "chain": row.get("chain", ""),
+                "chain": row.get("chain", "") or (direct_evidence.get("chain", "") if direct_evidence else ""),
                 "reference_url": row.get("reference_url", ""),
+                "direct_evidence_reference_url": direct_evidence.get("reference_url", "") if direct_evidence else "",
                 "source_url": row.get("source_url", ""),
                 "source_page": "",
                 "category_filter": "defillama_hacks",
-                "seed_transaction_hash": row.get("seed_transaction_hash", ""),
-                "fork_block": row.get("fork_block", ""),
+                "seed_transaction_hash": row.get("seed_transaction_hash", "") or (direct_evidence.get("seed_transaction_hash", "") if direct_evidence else ""),
+                "fork_block": row.get("fork_block", "") or (direct_evidence.get("fork_block", "") if direct_evidence else ""),
                 "description": description,
                 "normalized_at": now_utc_iso(),
             }
         )
     for row in direct_evidence_rows:
+        if row.get("incident_id", "") in matched_direct_evidence_ids:
+            continue
         target = row.get("target", "")
         description = row.get("description", "")
         attack_method = row.get("attack_method", "") or row.get("attack_method_raw", "")
@@ -285,6 +306,7 @@ def normalize_datasets(
                 "loss_usd": "" if loss_val is None else f"{loss_val:.2f}",
                 "chain": row.get("chain", ""),
                 "reference_url": row.get("reference_url", ""),
+                "direct_evidence_reference_url": row.get("reference_url", ""),
                 "source_url": row.get("source_url", ""),
                 "source_page": row.get("source_page", ""),
                 "category_filter": row.get("category_filter", "") or "direct_evidence",
@@ -332,6 +354,7 @@ def normalize_datasets(
             "loss_usd",
             "chain",
             "reference_url",
+            "direct_evidence_reference_url",
             "source_url",
             "source_page",
             "category_filter",
@@ -363,10 +386,181 @@ def normalize_datasets(
 
     return {
         "incident_rows": len(normalized_incidents),
+        "direct_evidence_enriched_count": len(matched_direct_evidence_ids),
+        "direct_evidence_standalone_count": len(direct_evidence_rows) - len(matched_direct_evidence_ids),
         "protocol_rows": len(normalized_protocols),
         "incidents_output": str(incidents_out),
         "protocols_output": str(protocols_out),
     }
+
+
+def build_direct_evidence_index(
+    rows: list[dict],
+    entries: list[dict],
+    token_index: dict[str, list[int]],
+    exact_norm: dict[str, str],
+) -> dict[str, list[dict]]:
+    """Index direct evidence by normalized target tokens for candidate enrichment."""
+
+    index: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        row = dict(row)
+        row["protocol_slug_guess"] = guess_protocol_slug(
+            str(row.get("target") or ""),
+            entries,
+            token_index,
+            exact_norm,
+        )
+        target = str(row.get("target") or "")
+        key = evidence_match_key(target)
+        if not key:
+            continue
+        index[key].append(row)
+    return index
+
+
+def best_direct_evidence_match(row: dict, index: dict[str, list[dict]], protocol_slug: str) -> dict:
+    target = str(row.get("target") or "")
+    key = evidence_match_key(target)
+    if not key and not protocol_slug:
+        return {}
+    candidates: list[dict] = []
+    for evidence_rows in index.values():
+        for evidence_row in evidence_rows:
+            evidence_slug = str(evidence_row.get("protocol_slug_guess") or "")
+            evidence_key = evidence_match_key(str(evidence_row.get("target") or ""))
+            if protocol_slug and evidence_slug:
+                if protocol_slug == evidence_slug or slug_tokens_overlap(protocol_slug, evidence_slug):
+                    candidates.append(evidence_row)
+                continue
+            if evidence_keys_match(key, evidence_key):
+                candidates.append(evidence_row)
+    if not candidates:
+        return {}
+    row_date = parse_event_date(str(row.get("event_date") or ""))
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: direct_evidence_match_score(row, candidate, row_date, protocol_slug),
+        reverse=True,
+    )
+    best = ranked[0]
+    return best if direct_evidence_match_score(row, best, row_date, protocol_slug) > 0 else {}
+
+
+def direct_evidence_match_score(row: dict, evidence: dict, row_date: date | None, protocol_slug: str) -> int:
+    target_key = evidence_match_key(str(row.get("target") or ""))
+    evidence_key = evidence_match_key(str(evidence.get("target") or ""))
+    evidence_slug = str(evidence.get("protocol_slug_guess") or "")
+    evidence_date = parse_event_date(str(evidence.get("event_date") or ""))
+    days = abs((row_date - evidence_date).days) if row_date and evidence_date else None
+    if protocol_slug and evidence_slug:
+        if protocol_slug == evidence_slug:
+            score = 500
+        else:
+            score = compatible_slug_match_score(protocol_slug, evidence_slug, days)
+            if score <= 0:
+                return 0
+    else:
+        fuzzy_score = fuzzy_direct_evidence_match_score(target_key, evidence_key, row_date, evidence)
+        if fuzzy_score <= 0:
+            return 0
+        score = fuzzy_score
+    if row_date and evidence_date:
+        if days <= 31:
+            score += 80
+        elif days <= 120:
+            score += 30
+        else:
+            score -= 40
+    if evidence.get("seed_transaction_hash"):
+        score += 20
+    if evidence.get("fork_block"):
+        score += 20
+    if "github.com/SunWeb3Sec/DeFiHackLabs" in str(evidence.get("reference_url") or ""):
+        score += 20
+    return score
+
+
+def compatible_slug_match_score(candidate_slug: str, evidence_slug: str, days: int | None) -> int:
+    if days is None or days > 45:
+        return 0
+    candidate_tokens = [token for token in candidate_slug.split("-") if token]
+    evidence_tokens = [token for token in evidence_slug.split("-") if token]
+    shared = set(candidate_tokens) & set(evidence_tokens)
+    if not shared:
+        return 0
+    longest_shared = max((len(token) for token in shared), default=0)
+    if longest_shared < 4:
+        return 0
+    smaller = min(len(candidate_tokens), len(evidence_tokens))
+    if len(shared) >= 2 or smaller == 1:
+        return 260
+    return 0
+
+
+def slug_tokens_overlap(candidate_slug: str, evidence_slug: str) -> bool:
+    candidate_tokens = [token for token in candidate_slug.split("-") if token]
+    evidence_tokens = [token for token in evidence_slug.split("-") if token]
+    shared = set(candidate_tokens) & set(evidence_tokens)
+    return max((len(token) for token in shared), default=0) >= 4
+
+
+def fuzzy_direct_evidence_match_score(
+    candidate_key: str,
+    evidence_key: str,
+    row_date: date | None,
+    evidence: dict,
+) -> int:
+    if not evidence_keys_match(candidate_key, evidence_key):
+        return 0
+    candidate_tokens = candidate_key.split("-") if candidate_key else []
+    evidence_tokens = evidence_key.split("-") if evidence_key else []
+    shared = set(candidate_tokens) & set(evidence_tokens)
+    evidence_date = parse_event_date(str(evidence.get("event_date") or ""))
+    days = abs((row_date - evidence_date).days) if row_date and evidence_date else None
+    if candidate_key == evidence_key:
+        return 220
+    if len(shared) >= 2:
+        return 150
+    if len(shared) == 1:
+        token = next(iter(shared))
+        if candidate_key == token and len(token) >= 4 and days is not None and days <= 45:
+            return 110
+    return 0
+
+
+def evidence_keys_match(candidate_key: str, evidence_key: str) -> bool:
+    if not candidate_key or not evidence_key:
+        return False
+    if candidate_key == evidence_key:
+        return True
+    candidate_tokens = set(candidate_key.split("-"))
+    evidence_tokens = set(evidence_key.split("-"))
+    if not candidate_tokens or not evidence_tokens:
+        return False
+    shared = candidate_tokens & evidence_tokens
+    if len(shared) >= 2:
+        return True
+    if len(shared) == 1:
+        token = next(iter(shared))
+        return candidate_key == token or evidence_key == token
+    return False
+
+
+def evidence_match_key(value: str) -> str:
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", value.lower())
+        if token not in EVIDENCE_MATCH_STOPWORDS and token not in {"v1", "v2", "v3", "finance"}
+    ]
+    return "-".join(tokens)
+
+
+def parse_event_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _is_defillama_defi_hack(row: dict) -> bool:

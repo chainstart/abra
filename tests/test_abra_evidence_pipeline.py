@@ -35,6 +35,7 @@ def _write_incidents_csv(path: Path, rows: list[dict[str, object]]) -> None:
         "loss_usd",
         "chain",
         "reference_url",
+        "direct_evidence_reference_url",
         "source_url",
         "source_page",
         "category_filter",
@@ -2095,6 +2096,39 @@ contract CurveLlamaLendExploitTest is Test {
     assert by_id["defihacklabs-2026-03-curve-llamalend"]["fork_block"] == "22044321"
 
 
+def test_direct_evidence_collector_prioritizes_recent_defihacklabs_fixtures(tmp_path, monkeypatch):
+    collector = _load_pipeline_module("direct_evidence_collector")
+
+    def fake_fetch_tree() -> list[dict[str, str]]:
+        return [
+            {"path": "src/test/2021-01/OldProtocol_exp.sol"},
+            {"path": "src/test/2026-03/NewProtocol_exp.sol"},
+            {"path": "src/test/2025-12/MidProtocol_exp.sol"},
+        ]
+
+    def fake_fetch_contents(path: str) -> dict[str, str]:
+        return {
+            "path": path,
+            "html_url": f"https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/{path}",
+            "download_url": f"https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/{path}",
+            "content": f"""
+// Attack Tx (Ethereum): https://etherscan.io/tx/0x{'a' * 64}
+contract ReplayFixture is Test {{
+    uint256 internal constant FORK_BLOCK = 22_044_321;
+}}
+            """,
+        }
+
+    monkeypatch.setattr(collector, "fetch_defihacklabs_tree", fake_fetch_tree)
+    monkeypatch.setattr(collector, "fetch_defihacklabs_fixture", fake_fetch_contents)
+
+    summary = collector.collect_direct_evidence(output_dir=tmp_path, max_defihacklabs=2)
+
+    assert summary["direct_candidate_count"] == 2
+    rows = _read_csv(tmp_path / "direct_evidence_latest.csv")
+    assert [row["target"] for row in rows] == ["NewProtocol", "MidProtocol"]
+
+
 def test_direct_evidence_collector_adds_github_auth_headers_when_token_is_available(tmp_path, monkeypatch):
     collector = _load_pipeline_module("direct_evidence_collector")
     monkeypatch.setenv("GITHUB_TOKEN", "gh-test-token")
@@ -2418,6 +2452,571 @@ def test_normalize_preserves_direct_evidence_seed_tx_and_fork_block(tmp_path):
     assert rows[0]["fork_block"] == "74937079"
 
 
+def test_normalize_enriches_matching_defillama_candidate_with_direct_replay_evidence(tmp_path):
+    normalize = _load_pipeline_module("normalize")
+    slowmist_csv = tmp_path / "slowmist.csv"
+    protocols_csv = tmp_path / "protocols.csv"
+    hacks_csv = tmp_path / "hacks.csv"
+    direct_csv = tmp_path / "direct_evidence.csv"
+    output_dir = tmp_path / "processed"
+
+    with slowmist_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+    with protocols_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=["id", "name", "slug", "category", "tvl", "chain", "chains_count", "chains"])
+        writer.writeheader()
+        writer.writerow(
+            {
+                "id": "1",
+                "name": "Curve LlamaLend",
+                "slug": "curve-llamalend",
+                "category": "Lending",
+                "tvl": "100",
+                "chain": "Ethereum",
+                "chains_count": "1",
+                "chains": "Ethereum",
+            }
+        )
+    with hacks_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "classification",
+                "chain",
+                "target_type",
+                "reference_url",
+                "source_url",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defillama-curve-llamalend",
+                "event_date": "2026-03-02",
+                "target": "Curve LlamaLend",
+                "description": "DefiLlama hack entry for a Curve LlamaLend exploit.",
+                "loss_usd_raw": "4800000",
+                "loss_usd": "4800000",
+                "attack_method": "Oracle Manipulation",
+                "classification": "Protocol Logic",
+                "chain": "Ethereum",
+                "target_type": "DeFi Protocol",
+                "reference_url": "",
+                "source_url": "https://defillama.com/hacks",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+    with direct_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "seed_transaction_hash",
+                "fork_block",
+                "direct_source_name",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defihacklabs-2026-03-curve-llamalend",
+                "event_date": "2026-03-01",
+                "target": "Curve LlamaLend",
+                "description": "DeFiHackLabs replay fixture with direct attack transaction evidence.",
+                "loss_usd_raw": "",
+                "loss_usd": "",
+                "attack_method": "Replay Fixture",
+                "reference_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-03/Curve_LlamaLend_exp.sol",
+                "source_url": "https://github.com/SunWeb3Sec/DeFiHackLabs",
+                "source_page": "",
+                "category_filter": "defihacklabs_replay",
+                "seed_transaction_hash": "0x" + "c" * 64,
+                "fork_block": "22044321",
+                "direct_source_name": "defihacklabs",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+
+    summary = normalize.normalize_datasets(
+        slowmist_csv=slowmist_csv,
+        defillama_protocols_csv=protocols_csv,
+        output_dir=output_dir,
+        defillama_hacks_csv=hacks_csv,
+        direct_evidence_csv=direct_csv,
+    )
+
+    assert summary["incident_rows"] == 1
+    assert summary["direct_evidence_enriched_count"] == 1
+    assert summary["direct_evidence_standalone_count"] == 0
+    rows = _read_csv(output_dir / "incidents_normalized_latest.csv")
+    assert rows[0]["incident_id"] == "defillama-curve-llamalend"
+    assert rows[0]["source_url"] == "https://defillama.com/hacks"
+    assert rows[0]["direct_evidence_reference_url"].endswith("Curve_LlamaLend_exp.sol")
+    assert rows[0]["seed_transaction_hash"] == "0x" + "c" * 64
+    assert rows[0]["fork_block"] == "22044321"
+
+
+def test_normalize_does_not_merge_direct_replay_evidence_into_different_protocol_slug(tmp_path):
+    normalize = _load_pipeline_module("normalize")
+    slowmist_csv = tmp_path / "slowmist.csv"
+    protocols_csv = tmp_path / "protocols.csv"
+    hacks_csv = tmp_path / "hacks.csv"
+    direct_csv = tmp_path / "direct_evidence.csv"
+    output_dir = tmp_path / "processed"
+
+    with slowmist_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+    with protocols_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=["id", "name", "slug", "category", "tvl", "chain", "chains_count", "chains"])
+        writer.writeheader()
+        writer.writerow(
+            {
+                "id": "1",
+                "name": "Curve DEX",
+                "slug": "curve-dex",
+                "category": "Dexs",
+                "tvl": "100",
+                "chain": "Ethereum",
+                "chains_count": "1",
+                "chains": "Ethereum",
+            }
+        )
+        writer.writerow(
+            {
+                "id": "2",
+                "name": "Curve LlamaLend",
+                "slug": "curve-llamalend",
+                "category": "Lending",
+                "tvl": "100",
+                "chain": "Ethereum",
+                "chains_count": "1",
+                "chains": "Ethereum",
+            }
+        )
+    with hacks_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "classification",
+                "chain",
+                "target_type",
+                "reference_url",
+                "source_url",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defillama-curve-dex",
+                "event_date": "2023-07-30",
+                "target": "Curve DEX",
+                "description": "DefiLlama hack entry for Curve DEX.",
+                "loss_usd_raw": "6100000",
+                "loss_usd": "6100000",
+                "attack_method": "Read-only Reentrancy",
+                "classification": "Protocol Logic",
+                "chain": "Ethereum",
+                "target_type": "DeFi Protocol",
+                "reference_url": "",
+                "source_url": "https://defillama.com/hacks",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+    with direct_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "seed_transaction_hash",
+                "fork_block",
+                "direct_source_name",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defihacklabs-2026-03-curve-llamalend",
+                "event_date": "2026-03-01",
+                "target": "Curve LlamaLend",
+                "description": "DeFiHackLabs replay fixture with direct attack transaction evidence.",
+                "loss_usd_raw": "",
+                "loss_usd": "",
+                "attack_method": "Replay Fixture",
+                "reference_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-03/Curve_LlamaLend_exp.sol",
+                "source_url": "https://github.com/SunWeb3Sec/DeFiHackLabs",
+                "source_page": "",
+                "category_filter": "defihacklabs_replay",
+                "seed_transaction_hash": "0x" + "d" * 64,
+                "fork_block": "22044321",
+                "direct_source_name": "defihacklabs",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+
+    summary = normalize.normalize_datasets(
+        slowmist_csv=slowmist_csv,
+        defillama_protocols_csv=protocols_csv,
+        output_dir=output_dir,
+        defillama_hacks_csv=hacks_csv,
+        direct_evidence_csv=direct_csv,
+    )
+
+    assert summary["incident_rows"] == 2
+    assert summary["direct_evidence_enriched_count"] == 0
+    assert summary["direct_evidence_standalone_count"] == 1
+    rows = _read_csv(output_dir / "incidents_normalized_latest.csv")
+    by_id = {row["incident_id"]: row for row in rows}
+    assert by_id["defillama-curve-dex"]["direct_evidence_reference_url"] == ""
+    assert by_id["defillama-curve-dex"]["seed_transaction_hash"] == ""
+    assert by_id["defihacklabs-2026-03-curve-llamalend"]["direct_evidence_reference_url"].endswith("Curve_LlamaLend_exp.sol")
+
+
+def test_normalize_does_not_merge_stopword_like_direct_replay_target(tmp_path):
+    normalize = _load_pipeline_module("normalize")
+    slowmist_csv = tmp_path / "slowmist.csv"
+    protocols_csv = tmp_path / "protocols.csv"
+    hacks_csv = tmp_path / "hacks.csv"
+    direct_csv = tmp_path / "direct_evidence.csv"
+    output_dir = tmp_path / "processed"
+
+    with slowmist_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+    with protocols_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=["id", "name", "slug", "category", "tvl", "chain", "chains_count", "chains"])
+        writer.writeheader()
+    with hacks_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "classification",
+                "chain",
+                "target_type",
+                "reference_url",
+                "source_url",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defillama-the-dao",
+                "event_date": "2016-06-17",
+                "target": "The DAO",
+                "description": "Historic DAO exploit entry.",
+                "loss_usd_raw": "60000000",
+                "loss_usd": "60000000",
+                "attack_method": "Reentrancy",
+                "classification": "Protocol Logic",
+                "chain": "Ethereum",
+                "target_type": "DeFi Protocol",
+                "reference_url": "",
+                "source_url": "https://defillama.com/hacks",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+    with direct_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "seed_transaction_hash",
+                "fork_block",
+                "direct_source_name",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defihacklabs-2026-03-venus-the",
+                "event_date": "2026-03-01",
+                "target": "Venus THE",
+                "description": "Replay fixture unrelated to The DAO.",
+                "loss_usd_raw": "",
+                "loss_usd": "",
+                "attack_method": "Replay Fixture",
+                "reference_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-03/Venus_THE_exp.sol",
+                "source_url": "https://github.com/SunWeb3Sec/DeFiHackLabs",
+                "source_page": "",
+                "category_filter": "defihacklabs_replay",
+                "seed_transaction_hash": "0x" + "e" * 64,
+                "fork_block": "22044321",
+                "direct_source_name": "defihacklabs",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+
+    summary = normalize.normalize_datasets(
+        slowmist_csv=slowmist_csv,
+        defillama_protocols_csv=protocols_csv,
+        output_dir=output_dir,
+        defillama_hacks_csv=hacks_csv,
+        direct_evidence_csv=direct_csv,
+    )
+
+    assert summary["incident_rows"] == 2
+    rows = _read_csv(output_dir / "incidents_normalized_latest.csv")
+    by_id = {row["incident_id"]: row for row in rows}
+    assert by_id["defillama-the-dao"]["direct_evidence_reference_url"] == ""
+    assert by_id["defillama-the-dao"]["seed_transaction_hash"] == ""
+
+
+def test_normalize_merges_direct_replay_evidence_for_close_slug_variant_when_dates_align(tmp_path):
+    normalize = _load_pipeline_module("normalize")
+    slowmist_csv = tmp_path / "slowmist.csv"
+    protocols_csv = tmp_path / "protocols.csv"
+    hacks_csv = tmp_path / "hacks.csv"
+    direct_csv = tmp_path / "direct_evidence.csv"
+    output_dir = tmp_path / "processed"
+
+    with slowmist_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+    with protocols_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=["id", "name", "slug", "category", "tvl", "chain", "chains_count", "chains"])
+        writer.writeheader()
+        writer.writerow(
+            {
+                "id": "1",
+                "name": "Moonwell Lending",
+                "slug": "moonwell-lending",
+                "category": "Lending",
+                "tvl": "100",
+                "chain": "Base",
+                "chains_count": "1",
+                "chains": "Base",
+            }
+        )
+        writer.writerow(
+            {
+                "id": "2",
+                "name": "Moonwell",
+                "slug": "moonwell",
+                "category": "Lending",
+                "tvl": "90",
+                "chain": "Base",
+                "chains_count": "1",
+                "chains": "Base",
+            }
+        )
+    with hacks_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "classification",
+                "chain",
+                "target_type",
+                "reference_url",
+                "source_url",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defillama-moonwell-lending",
+                "event_date": "2026-02-15",
+                "target": "Moonwell Lending",
+                "description": "DefiLlama hack entry for Moonwell Lending.",
+                "loss_usd_raw": "3100000",
+                "loss_usd": "3100000",
+                "attack_method": "Donation Attack",
+                "classification": "Protocol Logic",
+                "chain": "Base",
+                "target_type": "DeFi Protocol",
+                "reference_url": "",
+                "source_url": "https://defillama.com/hacks",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+    with direct_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "seed_transaction_hash",
+                "fork_block",
+                "direct_source_name",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defihacklabs-2026-02-moonwell",
+                "event_date": "2026-02-01",
+                "target": "Moonwell",
+                "description": "DeFiHackLabs replay fixture with direct attack transaction evidence.",
+                "loss_usd_raw": "",
+                "loss_usd": "",
+                "attack_method": "Replay Fixture",
+                "reference_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-02/Moonwell_exp.sol",
+                "source_url": "https://github.com/SunWeb3Sec/DeFiHackLabs",
+                "source_page": "",
+                "category_filter": "defihacklabs_replay",
+                "seed_transaction_hash": "0x" + "f" * 64,
+                "fork_block": "28591234",
+                "direct_source_name": "defihacklabs",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+
+    summary = normalize.normalize_datasets(
+        slowmist_csv=slowmist_csv,
+        defillama_protocols_csv=protocols_csv,
+        output_dir=output_dir,
+        defillama_hacks_csv=hacks_csv,
+        direct_evidence_csv=direct_csv,
+    )
+
+    assert summary["incident_rows"] == 1
+    assert summary["direct_evidence_enriched_count"] == 1
+    rows = _read_csv(output_dir / "incidents_normalized_latest.csv")
+    assert rows[0]["incident_id"] == "defillama-moonwell-lending"
+    assert rows[0]["direct_evidence_reference_url"].endswith("Moonwell_exp.sol")
+    assert rows[0]["seed_transaction_hash"] == "0x" + "f" * 64
+    assert rows[0]["fork_block"] == "28591234"
+
+
 def test_evidence_pipeline_marks_direct_replay_sources_as_candidate_discovery(tmp_path, monkeypatch):
     monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
     incidents_csv = tmp_path / "incidents_normalized_latest.csv"
@@ -2456,6 +3055,44 @@ def test_evidence_pipeline_marks_direct_replay_sources_as_candidate_discovery(tm
         {
             "source": "defihacklabs",
             "url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+        }
+    ]
+
+
+def test_evidence_pipeline_uses_normalized_direct_evidence_reference_as_security_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Curve LlamaLend",
+                reference_url="",
+                direct_evidence_reference_url=(
+                    "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-03/Curve_LlamaLend_exp.sol"
+                ),
+                source_url="https://defillama.com/hacks",
+                category_filter="defillama_hacks",
+                seed_transaction_hash="0x" + "c" * 64,
+                fork_block="22044321",
+            )
+        ],
+    )
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    rows = _read_csv(out_dir / "security_evidence_enriched_latest.csv")
+    assert rows[0]["security_anchor"] == "true"
+    assert json.loads(rows[0]["security_report_sources"]) == [
+        {
+            "source": "defihacklabs",
+            "url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-03/Curve_LlamaLend_exp.sol",
         }
     ]
 
