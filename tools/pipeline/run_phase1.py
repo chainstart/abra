@@ -8,6 +8,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from abra.runtime_bootstrap import ensure_repo_runtime
+
 
 def run_cmd(cmd: list[str], cwd: Path) -> None:
     """Run command and fail fast on non-zero exit."""
@@ -25,8 +31,9 @@ def main() -> None:
     parser.add_argument("--max-defihacklabs", type=int, default=250, help="Max DeFiHackLabs replay fixtures to ingest")
     parser.add_argument("--save-html", action="store_true", help="Persist raw SlowMist HTML pages")
     args = parser.parse_args()
+    ensure_repo_runtime(REPO_ROOT, required_modules=("requests", "bs4"))
 
-    repo_root = Path(__file__).resolve().parents[2]
+    repo_root = REPO_ROOT
     py = sys.executable
     scripts_dir = Path(__file__).resolve().parent
 

@@ -257,3 +257,10 @@ Based on **OWASP Smart Contract Top 10 (2026)** with protocol-specific business 
 ```bash
 pip install -r tools/requirements.txt
 ```
+
+If ABRA entrypoints are launched from a Python interpreter that does not already
+have these packages, the repo will bootstrap a local `.venv/` on first run and
+install `tools/requirements.txt` there before continuing. This keeps
+`python3 -m abra ...` and `python3 tools/pipeline/run_phase1.py ...` runnable
+from ARA external-command workspaces without relying on the caller's ambient
+site-packages.

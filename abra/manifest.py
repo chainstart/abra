@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
+from abra.runtime_bootstrap import ensure_repo_runtime
 
 
 LAB_MANIFEST_SCHEMA_VERSION = "abra.research_lab_manifest.v1"
@@ -153,13 +153,21 @@ def default_manifest_path() -> Path:
     return repo_root() / "research_lab.yaml"
 
 
+def _load_yaml_module() -> Any:
+    ensure_repo_runtime(repo_root(), required_modules=("yaml",))
+    import yaml
+
+    return yaml
+
+
 def load_manifest(path: str | Path | None = None) -> ResearchLabManifest:
     """Load and validate an ABRA ``research_lab.yaml`` manifest."""
 
     manifest_path = Path(path).expanduser().resolve() if path else default_manifest_path()
     if not manifest_path.exists():
         raise FileNotFoundError(f"Lab manifest not found: {manifest_path}")
-    raw_obj = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    yaml_module = _load_yaml_module()
+    raw_obj = yaml_module.safe_load(manifest_path.read_text(encoding="utf-8"))
     raw = raw_obj if isinstance(raw_obj, dict) else {}
     validation = validate_manifest(raw)
     if not isinstance(raw_obj, dict):

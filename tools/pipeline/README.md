@@ -50,6 +50,9 @@ For larger DeFiHackLabs refreshes, provide `GITHUB_PERSONAL_ACCESS_TOKEN`, `GITH
 or `GH_TOKEN` in the process environment or `.env.local`. The direct evidence collector also
 falls back to existing local `git` GitHub credentials when available, and if GitHub rate limits
 still fire mid-run it preserves the partial candidate set instead of aborting the whole Phase-1 step.
+If the calling Python interpreter does not already have ABRA's tool dependencies,
+the public entrypoints bootstrap a repo-local `.venv/` from `tools/requirements.txt`
+before running the pipeline.
 
 ## Output Paths
 

@@ -4,18 +4,33 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import requests
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
+from abra.runtime_bootstrap import ensure_repo_runtime
 from common import ensure_dir, now_utc_iso, write_csv, write_json
 
 CHAIN_URL = "https://api.llama.fi/chains"
 PROTOCOLS_URL = "https://api.llama.fi/protocols"
 HACKS_URL = "https://api.llama.fi/hacks"
 USER_AGENT = "abra-research-bot/1.0"
+_REQUESTS = None
+
+
+def _requests_runtime() -> Any:
+    global _REQUESTS
+    if _REQUESTS is None:
+        ensure_repo_runtime(REPO_ROOT, required_modules=("requests",))
+        import requests as requests_module
+
+        _REQUESTS = requests_module
+    return _REQUESTS
 
 
 def fetch_json(session: requests.Session, url: str) -> Any:
@@ -28,7 +43,8 @@ def fetch_json(session: requests.Session, url: str) -> Any:
 def collect_defillama(output_dir: Path, top_n: int) -> dict[str, Any]:
     """Collect raw and slim datasets from DefiLlama."""
     ensure_dir(output_dir)
-    session = requests.Session()
+    requests_module = _requests_runtime()
+    session = requests_module.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
     chains = fetch_json(session, CHAIN_URL)
