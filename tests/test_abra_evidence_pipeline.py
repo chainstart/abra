@@ -628,6 +628,8 @@ def test_evidence_pipeline_does_not_live_fetch_generic_reference_pages_without_t
 
 def test_evidence_pipeline_reports_missing_twitterapi_io_key_for_default_x_alert_fetch(tmp_path, monkeypatch):
     monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_DISABLE_LOCAL_ENV", "1")
+    monkeypatch.delenv("TWITTERAPI_IO_KEY", raising=False)
     incidents_csv = tmp_path / "incidents_normalized_latest.csv"
     out_dir = tmp_path / "processed"
     _write_incidents_csv(
@@ -1684,6 +1686,7 @@ def test_evidence_pipeline_recovers_x_tx_from_advanced_search_when_thread_contex
 
 def test_evidence_pipeline_reports_missing_twitterapi_io_key_for_x_alerts(tmp_path, monkeypatch):
     monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_DISABLE_LOCAL_ENV", "1")
     monkeypatch.delenv("TWITTERAPI_IO_KEY", raising=False)
     incidents_csv = tmp_path / "incidents_normalized_latest.csv"
     out_dir = tmp_path / "processed"
@@ -2021,3 +2024,259 @@ def test_normalize_merges_slowmist_and_defillama_hack_candidates(tmp_path):
     assert by_id["slowmist-1"]["source_url"] == "https://hacked.slowmist.io/?c=&page=1"
     assert by_id["defillama-1"]["source_url"] == "https://defillama.com/hacks"
     assert by_id["defillama-1"]["chain"] == "Ethereum"
+
+
+def test_direct_evidence_collector_persists_defihacklabs_replay_candidates(tmp_path, monkeypatch):
+    collector = _load_pipeline_module("direct_evidence_collector")
+
+    def fake_fetch_tree() -> list[dict[str, str]]:
+        return [
+            {"path": "src/test/2026-01/MTToken_exp.sol"},
+            {"path": "src/test/helpers/BaseForkTest.t.sol"},
+            {"path": "src/test/2026-03/Curve_LlamaLend_exp.sol"},
+        ]
+
+    def fake_fetch_contents(path: str) -> dict[str, str]:
+        if path == "src/test/2026-01/MTToken_exp.sol":
+            return {
+                "path": path,
+                "html_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+                "download_url": "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol",
+                "content": """
+// Attack Tx (BSC) : https://bscscan.com/tx/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+contract MTExploitTest is Test {
+    uint256 internal constant ATTACK_BLOCK = 74_937_080;
+    uint256 internal constant FORK_BLOCK = ATTACK_BLOCK - 1;
+    function setUp() public {
+        vm.createSelectFork("bsc", FORK_BLOCK);
+    }
+}
+                """,
+            }
+        if path == "src/test/2026-03/Curve_LlamaLend_exp.sol":
+            return {
+                "path": path,
+                "html_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-03/Curve_LlamaLend_exp.sol",
+                "download_url": "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-03/Curve_LlamaLend_exp.sol",
+                "content": """
+// Attack Tx (Ethereum) : https://etherscan.io/tx/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+contract CurveLlamaLendExploitTest is Test {
+    uint256 internal constant FORK_BLOCK = 22_044_321;
+    function setUp() public {
+        vm.createSelectFork("ethereum", FORK_BLOCK);
+    }
+}
+                """,
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(collector, "fetch_defihacklabs_tree", fake_fetch_tree)
+    monkeypatch.setattr(collector, "fetch_defihacklabs_fixture", fake_fetch_contents)
+
+    summary = collector.collect_direct_evidence(output_dir=tmp_path, max_defihacklabs=10)
+
+    assert summary["direct_candidate_count"] == 2
+    assert summary["defihacklabs_candidate_count"] == 2
+    rows = _read_csv(tmp_path / "direct_evidence_latest.csv")
+    by_id = {row["incident_id"]: row for row in rows}
+    assert sorted(by_id) == [
+        "defihacklabs-2026-01-mttoken",
+        "defihacklabs-2026-03-curve-llamalend",
+    ]
+    assert by_id["defihacklabs-2026-01-mttoken"]["source_url"] == "https://github.com/SunWeb3Sec/DeFiHackLabs"
+    assert by_id["defihacklabs-2026-01-mttoken"]["reference_url"].endswith("MTToken_exp.sol")
+    assert by_id["defihacklabs-2026-01-mttoken"]["chain"] == "bsc"
+    assert by_id["defihacklabs-2026-01-mttoken"]["seed_transaction_hash"] == "0x" + "a" * 64
+    assert by_id["defihacklabs-2026-01-mttoken"]["fork_block"] == "74937079"
+    assert by_id["defihacklabs-2026-03-curve-llamalend"]["chain"] == "ethereum"
+    assert by_id["defihacklabs-2026-03-curve-llamalend"]["seed_transaction_hash"] == "0x" + "b" * 64
+    assert by_id["defihacklabs-2026-03-curve-llamalend"]["fork_block"] == "22044321"
+
+
+def test_normalize_preserves_direct_evidence_seed_tx_and_fork_block(tmp_path):
+    normalize = _load_pipeline_module("normalize")
+    slowmist_csv = tmp_path / "slowmist.csv"
+    protocols_csv = tmp_path / "protocols.csv"
+    direct_csv = tmp_path / "direct_evidence.csv"
+    output_dir = tmp_path / "processed"
+
+    with slowmist_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+
+    with protocols_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=["id", "name", "slug", "category", "tvl", "chain", "chains_count", "chains"])
+        writer.writeheader()
+        writer.writerow(
+            {
+                "id": "1",
+                "name": "MTToken",
+                "slug": "mttoken",
+                "category": "Dexs",
+                "tvl": "100",
+                "chain": "Binance",
+                "chains_count": "1",
+                "chains": "Binance",
+            }
+        )
+
+    with direct_csv.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "incident_id",
+                "event_date",
+                "target",
+                "description",
+                "loss_usd_raw",
+                "loss_usd",
+                "attack_method",
+                "reference_url",
+                "source_url",
+                "source_page",
+                "category_filter",
+                "seed_transaction_hash",
+                "fork_block",
+                "direct_source_name",
+                "collected_at",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "incident_id": "defihacklabs-2026-01-mttoken",
+                "event_date": "2026-01-01",
+                "target": "MTToken",
+                "description": "DeFiHackLabs replay fixture with direct attack transaction evidence.",
+                "loss_usd_raw": "",
+                "loss_usd": "",
+                "attack_method": "Contract Vulnerability",
+                "reference_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+                "source_url": "https://github.com/SunWeb3Sec/DeFiHackLabs",
+                "source_page": "",
+                "category_filter": "defihacklabs_replay",
+                "seed_transaction_hash": "0x" + "a" * 64,
+                "fork_block": "74937079",
+                "direct_source_name": "defihacklabs",
+                "collected_at": "2026-05-24T00:00:00Z",
+            }
+        )
+
+    summary = normalize.normalize_datasets(
+        slowmist_csv=slowmist_csv,
+        defillama_protocols_csv=protocols_csv,
+        output_dir=output_dir,
+        direct_evidence_csv=direct_csv,
+    )
+
+    assert summary["incident_rows"] == 1
+    rows = _read_csv(output_dir / "incidents_normalized_latest.csv")
+    assert rows[0]["incident_id"] == "defihacklabs-2026-01-mttoken"
+    assert rows[0]["source_url"] == "https://github.com/SunWeb3Sec/DeFiHackLabs"
+    assert rows[0]["category_filter"] == "defihacklabs_replay"
+    assert rows[0]["seed_transaction_hash"] == "0x" + "a" * 64
+    assert rows[0]["fork_block"] == "74937079"
+
+
+def test_evidence_pipeline_marks_direct_replay_sources_as_candidate_discovery(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="DeFiHackLabs Replay Candidate",
+                reference_url="https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+                source_url="https://github.com/SunWeb3Sec/DeFiHackLabs",
+                category_filter="defihacklabs_replay",
+                seed_transaction_hash="0x" + "a" * 64,
+                fork_block="74937079",
+            )
+        ],
+    )
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["bsc"],
+    )
+
+    rows = _read_csv(out_dir / "security_evidence_enriched_latest.csv")
+    assert len(rows) == 1
+    assert json.loads(rows[0]["candidate_discovery_sources"]) == [
+        {
+            "role": "candidate_discovery",
+            "source": "defihacklabs_replay",
+            "url": "https://github.com/SunWeb3Sec/DeFiHackLabs",
+        }
+    ]
+    assert json.loads(rows[0]["security_report_sources"]) == [
+        {
+            "source": "defihacklabs",
+            "url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+        }
+    ]
+
+
+def test_evidence_pipeline_prioritizes_direct_sources_when_reference_fetch_budget_is_tight(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("ABRA_REFERENCE_FETCH_BUDGET", "1")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Generic Report Candidate",
+                reference_url="https://www.certik.com/resources/blog/generic-report-candidate",
+                source_url="https://defillama.com/hacks",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+            _incident(
+                2,
+                target="Direct Replay Candidate",
+                reference_url="https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+                source_url="https://github.com/SunWeb3Sec/DeFiHackLabs",
+                category_filter="defihacklabs_replay",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    fetched_urls: list[str] = []
+
+    def fake_source_fetcher(url: str) -> dict[str, str]:
+        fetched_urls.append(url)
+        return {"status": "fetched", "url": url, "text": "no onchain anchor in fixture"}
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=fake_source_fetcher,
+    )
+
+    assert fetched_urls == [
+        "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol"
+    ]

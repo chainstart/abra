@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 SECURITY_REPORT_SOURCES = {
     "blocksec_phalcon": ("phalcon.blocksec.com", "app.blocksec.com"),
     "metasleuth": ("metasleuth.io",),
+    "eigenphi": ("eigenphi.io",),
     "defihacklabs": ("github.com/sunweb3sec/defihacklabs",),
     "slowmist": ("slowmist.io", "slowmist_team"),
     "certik": ("certik.com",),
@@ -32,6 +33,26 @@ SECURITY_ALERT_SOCIAL_HANDLES = {
     "exvulsec": "exvul",
 }
 
+DIRECT_CANDIDATE_SOURCE_URLS = {
+    "defihacklabs_replay": ("github.com/sunweb3sec/defihacklabs",),
+    "blocksec_phalcon_incidents": ("phalcon.blocksec.com", "app.blocksec.com"),
+    "metasleuth_trace": ("metasleuth.io",),
+    "eigenphi": ("eigenphi.io",),
+}
+
+EXPLORER_TX_DOMAINS = (
+    "etherscan.io",
+    "basescan.org",
+    "bscscan.com",
+    "arbiscan.io",
+    "polygonscan.com",
+    "snowtrace.io",
+    "celoscan.io",
+    "era.zksync.network",
+    "zkevm.polygonscan.com",
+    "skylens.certik.com",
+)
+
 
 def candidate_discovery_sources(row: dict[str, str]) -> list[dict[str, str]]:
     """Return public candidate feeds only; these are not security anchors."""
@@ -39,6 +60,9 @@ def candidate_discovery_sources(row: dict[str, str]) -> list[dict[str, str]]:
     source_url = str(row.get("source_url") or "").strip()
     source_lower = source_url.lower()
     sources: list[dict[str, str]] = []
+    direct_source = direct_candidate_source(row)
+    if direct_source:
+        sources.append({"source": direct_source, "url": source_url, "role": "candidate_discovery"})
     if "hacked.slowmist.io" in source_lower:
         sources.append({"source": "slowmist_hacked", "url": source_url, "role": "candidate_discovery"})
     if "defillama.com/hacks" in source_lower or "api.llama.fi/hacks" in source_lower:
@@ -100,10 +124,32 @@ def direct_tx_security_source(url: str) -> str:
         return "blocksec_phalcon"
     if host.endswith("metasleuth.io"):
         return "metasleuth"
+    if host.endswith("eigenphi.io"):
+        return "eigenphi"
+    if host == "skylens.certik.com":
+        return "certik"
     if host == "github.com" and "sunweb3sec/defihacklabs" in path:
         return "defihacklabs"
     if "github.com/sunweb3sec/defihacklabs" in text:
         return "defihacklabs"
+    return ""
+
+
+def direct_candidate_source(row: dict[str, str]) -> str:
+    category = str(row.get("category_filter") or "").strip().lower()
+    source_url = str(row.get("source_url") or "").strip()
+    if category == "defihacklabs_replay":
+        return "defihacklabs_replay"
+    if not source_url:
+        return ""
+    parsed = urlparse(source_url)
+    host = (parsed.netloc or parsed.path.split("/", 1)[0]).lower().removeprefix("www.")
+    path = parsed.path.lower()
+    for name, markers in DIRECT_CANDIDATE_SOURCE_URLS.items():
+        if any(marker_matches_host(marker, host) for marker in markers):
+            return name
+    if any(host == domain or host.endswith(f".{domain}") for domain in EXPLORER_TX_DOMAINS) and "/tx/" in path:
+        return "explorer_tx"
     return ""
 
 

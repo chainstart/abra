@@ -37,6 +37,9 @@ def render_report(incidents: list[dict], protocols: list[dict], incidents_csv: s
                 loss_parsed += 1
 
     defi_count = sum(1 for row in incidents if (row.get("is_defi", "") or "").lower() == "true")
+    source_breakdown = Counter((row.get("category_filter", "") or "unknown") for row in incidents).most_common(10)
+    direct_tx_count = sum(1 for row in incidents if (row.get("seed_transaction_hash", "") or "").strip())
+    fork_block_count = sum(1 for row in incidents if (row.get("fork_block", "") or "").strip())
     attack_family_top = Counter((row.get("attack_family", "") or "other") for row in incidents).most_common(10)
     attack_method_top = Counter((row.get("attack_method_raw", "") or "unknown") for row in incidents).most_common(10)
 
@@ -55,10 +58,19 @@ def render_report(incidents: list[dict], protocols: list[dict], incidents_csv: s
     lines.append(f"| Unique incident IDs | {unique_ids} |")
     lines.append(f"| Duplicate rows | {duplicate_count} ({safe_pct(duplicate_count, total)}) |")
     lines.append(f"| DeFi-labeled incidents | {defi_count} ({safe_pct(defi_count, total)}) |")
+    lines.append(f"| Seed transaction hash coverage | {direct_tx_count} ({safe_pct(direct_tx_count, total)}) |")
+    lines.append(f"| Fork block coverage | {fork_block_count} ({safe_pct(fork_block_count, total)}) |")
     lines.append(f"| Protocol rows | {len(protocols)} |")
     lines.append(
         f"| Loss parsing coverage | {loss_parsed}/{loss_candidates} ({safe_pct(loss_parsed, loss_candidates)}) |"
     )
+    lines.append("")
+    lines.append("## Candidate Source Breakdown")
+    lines.append("")
+    lines.append("| Rank | Candidate Source | Count |")
+    lines.append("|---:|---|---:|")
+    for idx, (name, count) in enumerate(source_breakdown, start=1):
+        lines.append(f"| {idx} | {name} | {count} |")
     lines.append("")
     lines.append("## Missingness")
     lines.append("")
@@ -121,4 +133,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -113,6 +113,7 @@ python3 tools/pipeline/run_phase1.py --start-page 1 --end-page 3 --top-protocols
 # Output:
 # - data/raw/slowmist/
 # - data/raw/defillama/
+# - data/raw/direct_evidence/
 # - data/processed/
 # - reports/17_phase1_data_quality.md
 
@@ -164,12 +165,14 @@ Outputs:
 ### Build an Alchemy-Bounded Replay Cohort
 
 Use `abra replay cohort` before replay assessment when ARA asks ABRA to produce blockchain
-evidence. The cohort builder first consumes public incident candidates from SlowMist Hacked and
-DefiLlama hacks/losses, then materializes a four-stage evidence boundary:
+evidence. The cohort builder first consumes public incident candidates from SlowMist Hacked,
+DefiLlama hacks/losses, and direct tx / replay-oriented sources such as DeFiHackLabs-derived
+fixtures, then materializes a four-stage evidence boundary:
 `candidate_discovery`, `security_evidence_enrichment`, `alchemy_onchain_backfill`, and
 `replay_cohort_selection`. Security enrichment records URL-host anchored reports such as CertiK,
 BlockSec, PeckShield, SlowMist incident pages, Rekt, Immunefi, Beosin, ChainSecurity, OpenZeppelin,
 or official security-alert social accounts; text-only mentions of security firms do not count.
+Direct tx sources are prioritized ahead of generic report pages when source-fetch budget is tight.
 Social alerts and ordinary references are treated as provenance and search leads, not as blockers:
 if a source cannot be fetched directly, ABRA may use bounded on-chain-anchor discovery to find
 explorer/transaction references for the same candidate and then verify the fork block through

@@ -42,6 +42,14 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "side_effect_free": False,
     },
     {
+        "name": "direct_evidence_collector",
+        "description": "Collect direct tx / replay-oriented candidates from public sources such as DeFiHackLabs fixtures.",
+        "path": "tools/pipeline/direct_evidence_collector.py",
+        "command": ["python3", "tools/pipeline/direct_evidence_collector.py"],
+        "category": "data_pipeline",
+        "side_effect_free": False,
+    },
+    {
         "name": "security_evidence_enrichment",
         "description": "Materialize provenance, security-source, and reference evidence for candidate incidents.",
         "path": "abra/evidence_pipeline.py",

@@ -63,6 +63,7 @@ def test_tools_list_cli_preserves_existing_tool_inventory(capsys):
     assert tools["scanner"]["relative_path"] == "tools/scanner.py"
     assert tools["replay_runner"]["relative_path"] == "tools/replay_runner.py"
     assert tools["phase1_pipeline"]["relative_path"] == "tools/pipeline/run_phase1.py"
+    assert tools["direct_evidence_collector"]["relative_path"] == "tools/pipeline/direct_evidence_collector.py"
     assert tools["security_evidence_enrichment"]["relative_path"] == "abra/evidence_pipeline.py"
     assert tools["alchemy_onchain_backfill"]["relative_path"] == "abra/evidence_pipeline.py"
     assert all(tool["exists"] for tool in tools.values())

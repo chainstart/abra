@@ -151,7 +151,7 @@ def produce_evidence_pipeline(
             source_fetcher=source_fetcher or fetch_security_source_text,
             anchor_searcher=anchor_searcher or search_onchain_anchor_sources,
             rpc_caller=rpc_caller or json_rpc_call,
-            allow_reference_fetch=row["security_anchor"] == "true" or row["incident_id"] in reference_fetch_ids,
+            allow_reference_fetch=row["incident_id"] in reference_fetch_ids,
             allow_anchor_discovery=_onchain_anchor_discovery_enabled()
             and row["incident_id"] in anchor_discovery_ids,
         )
@@ -515,6 +515,8 @@ def _reference_fetch_priority(row: dict[str, str], rpc_supported_chains: set[str
     if not _row_rpc_supported(row, rpc_supported_chains):
         return 0
     priority = 10
+    if _row_has_direct_tx_source(row):
+        priority += 200
     if _row_has_tx_hint(row):
         priority += 100
     if row.get("security_anchor") == "true":
@@ -534,6 +536,8 @@ def _anchor_discovery_priority(row: dict[str, str], rpc_supported_chains: set[st
     if not missing_seed and not missing_block:
         return 0
     priority = 10
+    if _row_has_direct_tx_source(row):
+        priority += 120
     if row.get("security_anchor") == "true":
         priority += 100
     if _row_has_security_social_source(row):
@@ -556,6 +560,24 @@ def _row_has_security_social_source(row: dict[str, str]) -> bool:
         _requires_specialized_social_fetch(str(source.get("url") or ""))
         for source in _safe_json_list(row.get("security_report_sources") or "[]")
     )
+
+
+def _row_has_direct_tx_source(row: dict[str, str]) -> bool:
+    direct_sources = {
+        "blocksec_phalcon",
+        "metasleuth",
+        "eigenphi",
+        "defihacklabs",
+        "blocksec_phalcon_incidents",
+        "metasleuth_trace",
+        "defihacklabs_replay",
+        "explorer_tx",
+    }
+    for field in ("security_report_sources", "candidate_discovery_sources"):
+        for source in _safe_json_list(row.get(field) or "[]"):
+            if str(source.get("source") or "") in direct_sources:
+                return True
+    return False
 
 
 def _row_has_tx_hint(row: dict[str, str]) -> bool:
@@ -753,6 +775,12 @@ def _should_fetch_for_onchain_anchor(source: dict[str, str], *, allow_reference_
     source_name = str(source.get("source") or "")
     url = str(source.get("url") or "")
     if source_name != "reference_url":
+        if _requires_specialized_social_fetch(url):
+            return True
+        if source_name in {"blocksec_phalcon", "metasleuth", "eigenphi", "defihacklabs"}:
+            return True
+        if not allow_reference_fetch:
+            return False
         return True
     if allow_reference_fetch:
         return True
@@ -1114,8 +1142,12 @@ def _security_source_search_domains(source_name: str) -> list[str]:
     domains_by_source = {
         "blockaid": ["blockaid.io", "app.blockaid.io"],
         "blocksec": ["blocksec.com", "app.blocksec.com", "phalcon.blocksec.com"],
+        "blocksec_phalcon": ["phalcon.blocksec.com", "app.blocksec.com"],
         "defimon": ["defimon.xyz", "defimon.io", "x.com/DefimonAlerts"],
+        "defihacklabs": ["github.com/SunWeb3Sec/DeFiHackLabs"],
         "defi_nerd": ["x.com/Defi_Nerd_sec"],
+        "eigenphi": ["eigenphi.io"],
+        "metasleuth": ["metasleuth.io"],
         "peckshield": ["peckshield.com", "x.com/PeckShieldAlert"],
         "slowmist": ["slowmist.io", "hacked.slowmist.io", "x.com/SlowMist_Team"],
         "certik": ["certik.com", "skynet.certik.com", "x.com/CertiKAlert"],
@@ -1129,6 +1161,8 @@ def _common_security_anchor_domains() -> list[str]:
         "phalcon.blocksec.com",
         "app.blocksec.com",
         "blocksec.com",
+        "metasleuth.io",
+        "eigenphi.io",
         "peckshield.com",
         "slowmist.io",
         "hacked.slowmist.io",

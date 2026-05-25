@@ -4,13 +4,15 @@ This folder implements the first execution phase of the research plan:
 
 1. Ingest incident data from `hacked.slowmist.io`
 2. Ingest protocol/chain snapshots from `api.llama.fi`
-3. Normalize data for downstream analysis and experiments
-4. Generate a quality report for coverage and missingness checks
+3. Ingest direct evidence candidates from replay- and tx-oriented sources
+4. Normalize data for downstream analysis and experiments
+5. Generate a quality report for coverage, source mix, and onchain-anchor missingness checks
 
 ## Scripts
 
 - `slowmist_collector.py`: paginated incident collector
 - `defillama_collector.py`: protocol/chain snapshot collector
+- `direct_evidence_collector.py`: direct tx / replay candidate collector
 - `normalize.py`: schema normalization and heuristic labeling
 - `data_quality_report.py`: markdown quality report
 - `generate_event_cards.py`: per-incident replay card generator
@@ -30,6 +32,9 @@ python3 tools/pipeline/run_phase1.py --start-page 1 --end-page 3 --top-protocols
 # Full crawl can be done by expanding the page range
 python3 tools/pipeline/run_phase1.py --start-page 1 --end-page 102 --top-protocols 800 --save-html
 
+# Direct evidence only
+python3 tools/pipeline/direct_evidence_collector.py --max-defihacklabs 250
+
 # Generate replay cards for top DeFi incidents by loss
 python3 tools/pipeline/generate_event_cards.py --top-n 50
 
@@ -45,6 +50,7 @@ python3 tools/pipeline/generate_event_cards.py \
 
 - Raw incident snapshots: `data/raw/slowmist/`
 - Raw protocol snapshots: `data/raw/defillama/`
+- Raw direct evidence snapshots: `data/raw/direct_evidence/`
 - Normalized tables: `data/processed/`
 - Data quality report: `reports/17_phase1_data_quality.md`
 - Incident replay cards: `reports/events/`
@@ -62,4 +68,5 @@ python3 tools/pipeline/generate_event_cards.py \
 - `loss_usd`: parsed numeric loss (USD)
 - `reference_url`: source link
 - `source_url`, `source_page`, `category_filter`: provenance fields
+- `seed_transaction_hash`, `fork_block`: direct onchain anchor fields preserved from direct evidence sources
 - `description`: event description

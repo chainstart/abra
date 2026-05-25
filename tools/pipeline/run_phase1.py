@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--category", default="", help="SlowMist category filter")
     parser.add_argument("--delay-seconds", type=float, default=0.15, help="SlowMist request delay")
     parser.add_argument("--top-protocols", type=int, default=400, help="Top N protocols from DefiLlama")
+    parser.add_argument("--max-defihacklabs", type=int, default=250, help="Max DeFiHackLabs replay fixtures to ingest")
     parser.add_argument("--save-html", action="store_true", help="Persist raw SlowMist HTML pages")
     args = parser.parse_args()
 
@@ -55,6 +56,15 @@ def main() -> None:
         "data/raw/defillama",
     ]
 
+    direct_evidence_cmd = [
+        py,
+        str(scripts_dir / "direct_evidence_collector.py"),
+        "--output-dir",
+        "data/raw/direct_evidence",
+        "--max-defihacklabs",
+        str(args.max_defihacklabs),
+    ]
+
     normalize_cmd = [
         py,
         str(scripts_dir / "normalize.py"),
@@ -64,6 +74,8 @@ def main() -> None:
         "data/raw/defillama/defillama_protocols_slim_latest.csv",
         "--defillama-hacks-csv",
         "data/raw/defillama/defillama_hacks_latest.csv",
+        "--direct-evidence-csv",
+        "data/raw/direct_evidence/direct_evidence_latest.csv",
         "--output-dir",
         "data/processed",
     ]
@@ -94,6 +106,7 @@ def main() -> None:
 
     run_cmd(slowmist_cmd, cwd=repo_root)
     run_cmd(defillama_cmd, cwd=repo_root)
+    run_cmd(direct_evidence_cmd, cwd=repo_root)
     run_cmd(normalize_cmd, cwd=repo_root)
     run_cmd(evidence_cmd, cwd=repo_root)
     run_cmd(dq_cmd, cwd=repo_root)
