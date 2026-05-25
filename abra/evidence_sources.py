@@ -6,6 +6,9 @@ from urllib.parse import urlparse
 
 
 SECURITY_REPORT_SOURCES = {
+    "blocksec_phalcon": ("phalcon.blocksec.com", "app.blocksec.com"),
+    "metasleuth": ("metasleuth.io",),
+    "defihacklabs": ("github.com/sunweb3sec/defihacklabs",),
     "slowmist": ("slowmist.io", "slowmist_team"),
     "certik": ("certik.com",),
     "peckshield": ("peckshield", "peckshield.com"),
@@ -62,6 +65,13 @@ def security_report_sources(row: dict[str, str], card: dict[str, str] | None = N
                 sources.append({"source": social_source, "url": url})
                 seen.add(key)
             continue
+        direct_tx_source = direct_tx_security_source(url)
+        if direct_tx_source:
+            key = (direct_tx_source, url)
+            if key not in seen:
+                sources.append({"source": direct_tx_source, "url": url})
+                seen.add(key)
+            continue
         host = url_host(url)
         for name, markers in SECURITY_REPORT_SOURCES.items():
             if any(marker_matches_host(marker, host) for marker in markers):
@@ -79,6 +89,22 @@ def security_alert_social_source(url: str) -> str:
         return ""
     handle = parsed.path.strip("/").split("/", 1)[0].lower()
     return SECURITY_ALERT_SOCIAL_HANDLES.get(handle, "")
+
+
+def direct_tx_security_source(url: str) -> str:
+    text = url.strip().lower()
+    parsed = urlparse(url.strip())
+    host = (parsed.netloc or parsed.path.split("/", 1)[0]).lower().removeprefix("www.")
+    path = parsed.path.lower()
+    if host.endswith("phalcon.blocksec.com") or host == "app.blocksec.com":
+        return "blocksec_phalcon"
+    if host.endswith("metasleuth.io"):
+        return "metasleuth"
+    if host == "github.com" and "sunweb3sec/defihacklabs" in path:
+        return "defihacklabs"
+    if "github.com/sunweb3sec/defihacklabs" in text:
+        return "defihacklabs"
+    return ""
 
 
 def text_only_security_mentions_ignored(row: dict[str, str], card: dict[str, str] | None = None) -> bool:
@@ -119,6 +145,8 @@ def url_host(url: str) -> str:
 
 def marker_matches_host(marker: str, host: str) -> bool:
     marker_text = marker.lower().removeprefix("www.")
+    if "/" in marker_text:
+        return host == marker_text.split("/", 1)[0]
     if "." in marker_text:
         return host == marker_text or host.endswith(f".{marker_text}")
     return host == marker_text or host.startswith(f"{marker_text}.")

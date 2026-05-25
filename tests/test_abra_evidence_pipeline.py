@@ -300,6 +300,54 @@ def test_evidence_pipeline_accepts_official_security_alert_x_accounts_only(tmp_p
     assert json.loads(rows["random-x-candidate"]["security_report_sources"]) == []
 
 
+def test_evidence_pipeline_recognizes_direct_tx_security_sources(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    rows = [
+        _incident(
+            1,
+            target="Phalcon Direct Candidate",
+            reference_url="https://phalcon.blocksec.com/explorer/security-incidents/fixture",
+        ),
+        _incident(
+            2,
+            target="MetaSleuth Direct Candidate",
+            reference_url="https://metasleuth.io/result/eth/0x1234",
+        ),
+        _incident(
+            3,
+            target="DeFiHackLabs Direct Candidate",
+            reference_url="https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/Fixture.t.sol",
+        ),
+    ]
+    _write_incidents_csv(incidents_csv, rows)
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    enriched = {row["slug"]: row for row in _read_csv(out_dir / "security_evidence_enriched_latest.csv")}
+    assert json.loads(enriched["phalcon-direct-candidate"]["security_report_sources"]) == [
+        {
+            "source": "blocksec_phalcon",
+            "url": "https://phalcon.blocksec.com/explorer/security-incidents/fixture",
+        }
+    ]
+    assert json.loads(enriched["metasleuth-direct-candidate"]["security_report_sources"]) == [
+        {"source": "metasleuth", "url": "https://metasleuth.io/result/eth/0x1234"}
+    ]
+    assert json.loads(enriched["defihacklabs-direct-candidate"]["security_report_sources"]) == [
+        {
+            "source": "defihacklabs",
+            "url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/Fixture.t.sol",
+        }
+    ]
+    assert all(row["security_anchor"] == "true" for row in enriched.values())
+
+
 def test_evidence_pipeline_backfills_tx_hash_and_block_from_security_source_and_alchemy(tmp_path, monkeypatch):
     monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
     tx_hash = "0x" + "a" * 64
@@ -362,6 +410,41 @@ def test_evidence_pipeline_backfills_tx_hash_and_block_from_security_source_and_
     payload = json.loads((out_dir / "alchemy_onchain_backfill_latest.json").read_text(encoding="utf-8"))
     assert payload["summary"]["backfilled_onchain_anchor_count"] == 1
     assert payload["summary"]["onchain_anchor_complete_count"] == 1
+
+
+def test_evidence_pipeline_skips_source_fetch_for_alchemy_unsupported_chains(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="EOS Unsupported Candidate",
+                chain="eos",
+                reference_url="https://blocksec.com/blog/eos-candidate-analysis",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            )
+        ],
+    )
+
+    def fail_if_fetched(*_args, **_kwargs):
+        raise AssertionError("unsupported Alchemy chains must not consume source-fetch budget")
+
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        source_fetcher=fail_if_fetched,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert rows[0]["rpc_supported"] == "false"
+    assert rows[0]["backfill_status"] == "blocked_rpc_unsupported"
+    assert rows[0]["source_fetch_status"] == "source_fetch_skipped:rpc_unsupported"
 
 
 def test_evidence_pipeline_backfills_reference_tx_without_security_source_anchor(tmp_path, monkeypatch):

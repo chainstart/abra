@@ -285,7 +285,10 @@ def _build_backfill_row(
     anchor_discovery_attempt_count = 0
     anchor_discovery_timeout_count = 0
     anchor_discovery_result_statuses = ""
-    if (not seed_hash or not fork_block) and evidence_sources:
+    supported = chain_rpc_supported(chain, rpc_supported_chains)
+    if (not seed_hash or not fork_block) and evidence_sources and not supported:
+        source_fetch_status = "source_fetch_skipped:rpc_unsupported"
+    elif (not seed_hash or not fork_block) and evidence_sources:
         source_evidence = _extract_onchain_anchor_from_security_sources(
             evidence_sources,
             incident_context=incident_context,
@@ -300,7 +303,6 @@ def _build_backfill_row(
         fork_block = fork_block or source_extracted_block
 
     rpc_backfill_status = "not_required" if fork_block else "not_attempted"
-    supported = chain_rpc_supported(chain, rpc_supported_chains)
     if seed_hash and not fork_block and supported:
         rpc_result = _fetch_fork_block_from_rpc(chain, seed_hash, rpc_caller)
         rpc_backfill_status = rpc_result["rpc_backfill_status"]
