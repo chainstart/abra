@@ -11,10 +11,10 @@ import os
 import re
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
 
 from abra.chain_support import (
     chain_id,
@@ -97,7 +97,7 @@ ALCHEMY_BACKFILL_FIELDS = [
     "security_report_sources",
 ]
 
-SourceFetcher = Callable[[str], dict[str, str]]
+SourceFetcher = Callable[..., dict[str, str]]
 RpcCaller = Callable[[str, str, list[str]], dict[str, Any]]
 AnchorSearcher = Callable[[dict[str, str]], list[dict[str, str]]]
 
@@ -633,7 +633,7 @@ def _extract_onchain_anchor_from_security_sources(
         if seed_hash or block:
             return {
                 "source_fetch_status": status,
-                "source_evidence_url": url,
+                "source_evidence_url": str(fetched.get("url") or url),
                 "source_extracted_seed_transaction_hash": seed_hash,
                 "source_extracted_block": "" if block is None else str(block),
             }
@@ -1213,13 +1213,51 @@ def fetch_x_security_source_text(url: str) -> dict[str, str]:
     if not api_key:
         return {"status": "twitterapi_io_not_configured", "url": url, "text": ""}
 
-    cached = _read_twitterapi_io_cache(tweet_id)
-    if cached is not None:
-        return _twitterapi_io_payload_to_source_text(cached, url=url, cache_status="hit")
-    if not _claim_twitterapi_io_request_budget():
-        return {"status": "twitterapi_io_budget_exhausted", "url": url, "text": ""}
+    root_fetch = _fetch_twitterapi_io_json(
+        "/twitter/tweets",
+        {"tweet_ids": tweet_id},
+        api_key=api_key,
+        cache_key=tweet_id,
+    )
+    root_status = str(root_fetch.get("status") or "")
+    if root_status != "twitterapi_io_fetched":
+        return {"status": root_status, "url": url, "text": ""}
 
-    request_url = f"https://api.twitterapi.io/twitter/tweets?tweet_ids={quote(tweet_id, safe='')}"
+    combined_payload = _twitterapi_io_combined_payload(root_fetch["payload"])
+    cache_statuses = [str(root_fetch.get("cache") or "miss")]
+    if not _twitterapi_io_payload_has_onchain_anchor(combined_payload):
+        for enrichment in _twitterapi_io_enrichment_payloads(tweet_id, combined_payload, api_key=api_key):
+            enrichment_status = str(enrichment.get("status") or "")
+            if enrichment_status != "twitterapi_io_fetched":
+                if enrichment_status == "twitterapi_io_budget_exhausted":
+                    break
+                continue
+            cache_statuses.append(str(enrichment.get("cache") or "miss"))
+            _twitterapi_io_extend_combined_payload(combined_payload, enrichment["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(combined_payload):
+                break
+
+    return _twitterapi_io_payload_to_source_text(
+        combined_payload,
+        url=url,
+        cache_status="mixed" if len(set(cache_statuses)) > 1 else cache_statuses[0],
+    )
+
+
+def _fetch_twitterapi_io_json(
+    endpoint: str,
+    params: dict[str, str],
+    *,
+    api_key: str,
+    cache_key: str,
+) -> dict[str, Any]:
+    cached = _read_twitterapi_io_cache_key(cache_key)
+    if cached is not None:
+        return {"status": "twitterapi_io_fetched", "payload": cached, "cache": "hit"}
+    if not _claim_twitterapi_io_request_budget():
+        return {"status": "twitterapi_io_budget_exhausted", "payload": {}, "cache": "miss"}
+
+    request_url = f"https://api.twitterapi.io{endpoint}?{urlencode(params)}"
     request = urllib.request.Request(
         request_url,
         headers={
@@ -1232,19 +1270,257 @@ def fetch_x_security_source_text(url: str) -> dict[str, str]:
         with urllib.request.urlopen(request, timeout=_twitterapi_io_timeout_seconds()) as response:
             raw = response.read(1_000_000)
     except urllib.error.HTTPError as exc:
-        return {"status": f"twitterapi_io_http_{exc.code}", "url": url, "text": ""}
+        return {"status": f"twitterapi_io_http_{exc.code}", "payload": {}, "cache": "miss"}
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", "")
         reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
-        return {"status": f"twitterapi_io_failed:{reason_name}", "url": url, "text": ""}
+        return {"status": f"twitterapi_io_failed:{reason_name}", "payload": {}, "cache": "miss"}
     except OSError as exc:
-        return {"status": f"twitterapi_io_failed:{exc.__class__.__name__}", "url": url, "text": ""}
+        return {"status": f"twitterapi_io_failed:{exc.__class__.__name__}", "payload": {}, "cache": "miss"}
     try:
         payload = json.loads(raw.decode("utf-8", errors="replace"))
     except json.JSONDecodeError:
-        return {"status": "twitterapi_io_invalid_json", "url": url, "text": ""}
-    _write_twitterapi_io_cache(tweet_id, payload)
-    return _twitterapi_io_payload_to_source_text(payload, url=url, cache_status="miss")
+        return {"status": "twitterapi_io_invalid_json", "payload": {}, "cache": "miss"}
+    if not isinstance(payload, dict):
+        return {"status": "twitterapi_io_invalid_json", "payload": {}, "cache": "miss"}
+    _write_twitterapi_io_cache_key(cache_key, payload)
+    return {"status": "twitterapi_io_fetched", "payload": payload, "cache": "miss"}
+
+
+def _twitterapi_io_enrichment_payloads(
+    tweet_id: str,
+    combined_payload: dict[str, Any],
+    *,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    enrichments: list[dict[str, Any]] = []
+    for fetch_result in _twitterapi_io_thread_context_payloads(tweet_id, api_key=api_key):
+        enrichments.append(fetch_result)
+        if fetch_result.get("status") == "twitterapi_io_fetched":
+            preview = _twitterapi_io_combined_payload(fetch_result["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(preview):
+                return enrichments
+    if enrichments and enrichments[-1].get("status") == "twitterapi_io_budget_exhausted":
+        return enrichments
+
+    for fetch_result in _twitterapi_io_reply_payloads(tweet_id, api_key=api_key):
+        enrichments.append(fetch_result)
+        if fetch_result.get("status") == "twitterapi_io_fetched":
+            preview = _twitterapi_io_combined_payload(fetch_result["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(preview):
+                return enrichments
+    if enrichments and enrichments[-1].get("status") == "twitterapi_io_budget_exhausted":
+        return enrichments
+
+    for fetch_result in _twitterapi_io_advanced_search_payloads(combined_payload, api_key=api_key):
+        enrichments.append(fetch_result)
+        if fetch_result.get("status") == "twitterapi_io_fetched":
+            preview = _twitterapi_io_combined_payload(fetch_result["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(preview):
+                return enrichments
+    return enrichments
+
+
+def _twitterapi_io_thread_context_payloads(tweet_id: str, *, api_key: str) -> list[dict[str, Any]]:
+    return _twitterapi_io_paginated_payloads(
+        "/twitter/tweet/thread_context",
+        {"tweetId": tweet_id},
+        cache_prefix=f"thread_context_{tweet_id}",
+        max_pages=_twitterapi_io_thread_context_max_pages(),
+        api_key=api_key,
+    )
+
+
+def _twitterapi_io_reply_payloads(tweet_id: str, *, api_key: str) -> list[dict[str, Any]]:
+    return _twitterapi_io_paginated_payloads(
+        "/twitter/tweet/replies",
+        {"tweetId": tweet_id},
+        cache_prefix=f"replies_{tweet_id}",
+        max_pages=_twitterapi_io_reply_max_pages(),
+        api_key=api_key,
+    )
+
+
+def _twitterapi_io_paginated_payloads(
+    endpoint: str,
+    params: dict[str, str],
+    *,
+    cache_prefix: str,
+    max_pages: int,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    cursor = ""
+    for page in range(max_pages):
+        page_params = dict(params)
+        if cursor:
+            page_params["cursor"] = cursor
+        result = _fetch_twitterapi_io_json(
+            endpoint,
+            page_params,
+            api_key=api_key,
+            cache_key=f"{cache_prefix}_{page}_{cursor or 'first'}",
+        )
+        results.append(result)
+        if result.get("status") != "twitterapi_io_fetched":
+            break
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            break
+        if not payload.get("has_next_page"):
+            break
+        cursor = str(payload.get("next_cursor") or "")
+        if not cursor:
+            break
+    return results
+
+
+def _twitterapi_io_advanced_search_payloads(
+    combined_payload: dict[str, Any],
+    *,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for query in _twitterapi_io_advanced_search_queries(combined_payload)[: _twitterapi_io_advanced_search_max_queries()]:
+        result = _fetch_twitterapi_io_json(
+            "/twitter/tweet/advanced_search",
+            {"query": query, "queryType": "Latest"},
+            api_key=api_key,
+            cache_key=f"advanced_search_{_sha1([query])[:16]}",
+        )
+        if isinstance(result.get("payload"), dict):
+            result["payload"]["_abra_source"] = "advanced_search"
+        results.append(result)
+        if result.get("status") != "twitterapi_io_fetched":
+            break
+        payload = result.get("payload")
+        if isinstance(payload, dict) and _twitterapi_io_payload_has_onchain_anchor(_twitterapi_io_combined_payload(payload)):
+            break
+    return results
+
+
+def _twitterapi_io_advanced_search_queries(combined_payload: dict[str, Any]) -> list[str]:
+    root_tweet = _twitterapi_io_tweets_from_payload(combined_payload)[0] if _twitterapi_io_tweets_from_payload(combined_payload) else {}
+    if not isinstance(root_tweet, dict):
+        return []
+    author = _twitterapi_io_author_username(root_tweet)
+    conversation_id = str(root_tweet.get("conversationId") or root_tweet.get("id") or "").strip()
+    terms = _twitterapi_io_search_terms(root_tweet)
+    time_window = _twitterapi_io_search_time_window(root_tweet)
+    onchain_terms = "(tx OR transaction OR etherscan OR arbiscan OR bscscan OR basescan OR polygonscan)"
+    queries: list[str] = []
+    if conversation_id:
+        queries.append(" ".join(part for part in (f"conversation_id:{conversation_id}", onchain_terms, time_window) if part))
+    if author and terms:
+        query_terms = " OR ".join(f'"{term}"' for term in terms[:4])
+        queries.append(" ".join(part for part in (f"from:{author}", f"({query_terms})", onchain_terms, time_window) if part))
+    if author:
+        queries.append(" ".join(part for part in (f"from:{author}", onchain_terms, time_window) if part))
+    return _dedupe_strings(queries)
+
+
+def _twitterapi_io_search_terms(tweet: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    entities = tweet.get("entities")
+    if isinstance(entities, dict):
+        for mention in entities.get("user_mentions") or []:
+            if not isinstance(mention, dict):
+                continue
+            for key in ("screen_name", "name"):
+                value = str(mention.get(key) or "").strip()
+                if value:
+                    terms.append(value)
+    text = str(tweet.get("text") or "")
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]{2,}(?:\s+[A-Z][A-Za-z0-9]{2,}){0,2}\b", text):
+        term = " ".join(match.group(0).split())
+        if term.lower() not in {"community alert", "more details"}:
+            terms.append(term)
+    return _dedupe_strings(terms)
+
+
+def _twitterapi_io_search_time_window(tweet: dict[str, Any]) -> str:
+    created_at = str(tweet.get("createdAt") or "").strip()
+    if not created_at:
+        return ""
+    try:
+        dt = datetime.strptime(created_at, "%a %b %d %H:%M:%S %z %Y")
+    except ValueError:
+        return ""
+    since_time = int((dt - timedelta(days=2)).timestamp())
+    until_time = int((dt + timedelta(days=5)).timestamp())
+    return f"since_time:{since_time} until_time:{until_time}"
+
+
+def _twitterapi_io_author_username(tweet: dict[str, Any]) -> str:
+    author = tweet.get("author")
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("userName") or author.get("screen_name") or "").strip().lstrip("@")
+
+
+def _twitterapi_io_combined_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    combined: dict[str, Any] = {
+        "tweets": [],
+        "root_author": _twitterapi_io_root_author(payload),
+        "conversation_id": _twitterapi_io_root_conversation_id(payload),
+        "source": str(payload.get("_abra_source") or ""),
+    }
+    _twitterapi_io_extend_combined_payload(combined, payload)
+    return combined
+
+
+def _twitterapi_io_extend_combined_payload(combined: dict[str, Any], payload: dict[str, Any]) -> None:
+    tweets = combined.setdefault("tweets", [])
+    if not isinstance(tweets, list):
+        combined["tweets"] = tweets = []
+    seen = {str(tweet.get("id") or tweet.get("url") or "") for tweet in tweets if isinstance(tweet, dict)}
+    payload_source = str(payload.get("_abra_source") or "")
+    for tweet in _twitterapi_io_tweets_from_payload(payload):
+        if not _twitterapi_io_should_keep_tweet(tweet, combined, payload_source=payload_source):
+            continue
+        key = str(tweet.get("id") or tweet.get("url") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        tweets.append(tweet)
+
+
+def _twitterapi_io_root_author(payload: dict[str, Any]) -> str:
+    tweets = _twitterapi_io_tweets_from_payload(payload)
+    if not tweets:
+        return ""
+    return _twitterapi_io_author_username(tweets[0])
+
+
+def _twitterapi_io_root_conversation_id(payload: dict[str, Any]) -> str:
+    tweets = _twitterapi_io_tweets_from_payload(payload)
+    if not tweets:
+        return ""
+    return str(tweets[0].get("conversationId") or tweets[0].get("id") or "").strip()
+
+
+def _twitterapi_io_should_keep_tweet(
+    tweet: dict[str, Any],
+    combined: dict[str, Any],
+    *,
+    payload_source: str = "",
+) -> bool:
+    if payload_source == "advanced_search" or str(combined.get("source") or "") == "advanced_search":
+        tweet_text = "\n".join(_twitterapi_io_tweet_text_parts(tweet))
+        return bool(extract_seed_transaction_hash({"source_text": tweet_text}) or extract_block_number(tweet_text) is not None)
+    root_conversation_id = str(combined.get("conversation_id") or "")
+    conversation_id = str(tweet.get("conversationId") or tweet.get("id") or "").strip()
+    if root_conversation_id and conversation_id and conversation_id != root_conversation_id:
+        return False
+    root_author = str(combined.get("root_author") or "")
+    if not root_author:
+        return True
+    author = _twitterapi_io_author_username(tweet)
+    if author.lower() == root_author.lower():
+        return True
+    tweet_text = "\n".join(_twitterapi_io_tweet_text_parts(tweet))
+    return bool(extract_seed_transaction_hash({"source_text": tweet_text}) or extract_block_number(tweet_text) is not None)
 
 
 def _twitterapi_io_payload_to_source_text(payload: dict[str, Any], *, url: str, cache_status: str) -> dict[str, str]:
@@ -1256,9 +1532,11 @@ def _twitterapi_io_payload_to_source_text(payload: dict[str, Any], *, url: str, 
     for tweet in tweets:
         if not isinstance(tweet, dict):
             continue
-        evidence_url = str(tweet.get("url") or evidence_url)
-        text_parts.append(str(tweet.get("text") or ""))
-        text_parts.extend(_twitterapi_io_entity_urls(tweet))
+        tweet_text_parts = _twitterapi_io_tweet_text_parts(tweet)
+        tweet_text = "\n".join(tweet_text_parts)
+        if extract_seed_transaction_hash({"source_text": tweet_text}) or extract_block_number(tweet_text) is not None:
+            evidence_url = str(tweet.get("url") or evidence_url)
+        text_parts.extend(tweet_text_parts)
     text = html.unescape("\n".join(part for part in text_parts if part))
     if not text:
         return {"status": "twitterapi_io_empty_tweet", "url": evidence_url, "text": "", "cache": cache_status}
@@ -1269,6 +1547,40 @@ def _twitterapi_io_payload_to_source_text(payload: dict[str, Any], *, url: str, 
         "cache": cache_status,
         "text": text,
     }
+
+
+def _twitterapi_io_payload_has_onchain_anchor(payload: dict[str, Any]) -> bool:
+    text = _twitterapi_io_payload_text(payload)
+    return bool(extract_seed_transaction_hash({"source_text": text}) or extract_block_number(text) is not None)
+
+
+def _twitterapi_io_payload_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for tweet in _twitterapi_io_tweets_from_payload(payload):
+        parts.extend(_twitterapi_io_tweet_text_parts(tweet))
+    return html.unescape("\n".join(part for part in parts if part))
+
+
+def _twitterapi_io_tweets_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    tweets: list[dict[str, Any]] = []
+    for key in ("tweets", "replies"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            tweets.extend(item for item in values if isinstance(item, dict))
+    return tweets
+
+
+def _twitterapi_io_tweet_text_parts(tweet: dict[str, Any]) -> list[str]:
+    parts: list[str] = []
+    text = str(tweet.get("text") or "")
+    if text:
+        parts.append(text)
+    parts.extend(_twitterapi_io_entity_urls(tweet))
+    for nested_key in ("quoted_tweet", "retweeted_tweet"):
+        nested = tweet.get(nested_key)
+        if isinstance(nested, dict):
+            parts.extend(_twitterapi_io_tweet_text_parts(nested))
+    return parts
 
 
 def _twitterapi_io_entity_urls(tweet: dict[str, Any]) -> list[str]:
@@ -1289,6 +1601,39 @@ def _twitterapi_io_entity_urls(tweet: dict[str, Any]) -> list[str]:
                     extracted.append(value)
                     break
     return extracted
+
+
+def _read_twitterapi_io_cache_key(cache_key: str) -> dict[str, Any] | None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return None
+    path = cache_dir / f"{_safe_twitterapi_io_cache_key(cache_key)}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_twitterapi_io_cache_key(cache_key: str, payload: dict[str, Any]) -> None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{_safe_twitterapi_io_cache_key(cache_key)}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _safe_twitterapi_io_cache_key(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
+    return safe[:180] or _sha1([value])[:16]
 
 
 def _tweet_id_from_url(url: str) -> str:
@@ -1348,9 +1693,30 @@ def _twitterapi_io_timeout_seconds() -> float:
 
 def _twitterapi_io_max_requests() -> int:
     try:
-        return max(0, int(os.environ.get("ABRA_TWITTERAPI_IO_MAX_REQUESTS", "5")))
+        return max(0, int(os.environ.get("ABRA_TWITTERAPI_IO_MAX_REQUESTS", "8")))
     except ValueError:
-        return 5
+        return 8
+
+
+def _twitterapi_io_thread_context_max_pages() -> int:
+    try:
+        return max(1, int(os.environ.get("ABRA_TWITTERAPI_IO_THREAD_CONTEXT_MAX_PAGES", "2")))
+    except ValueError:
+        return 2
+
+
+def _twitterapi_io_reply_max_pages() -> int:
+    try:
+        return max(1, int(os.environ.get("ABRA_TWITTERAPI_IO_REPLY_MAX_PAGES", "1")))
+    except ValueError:
+        return 1
+
+
+def _twitterapi_io_advanced_search_max_queries() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_TWITTERAPI_IO_ADVANCED_SEARCH_MAX_QUERIES", "3")))
+    except ValueError:
+        return 3
 
 
 def _reset_twitterapi_io_request_budget() -> None:

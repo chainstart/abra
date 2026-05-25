@@ -1243,6 +1243,362 @@ def test_evidence_pipeline_fetches_x_alert_text_with_twitterapi_io(tmp_path, mon
     assert rows[0]["rpc_backfill_status"] == "receipt_verified"
 
 
+def test_evidence_pipeline_resolves_x_thread_follow_up_tweet_for_tx_hash(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "twitterapi-test-key")
+    tx_hash = "0x" + "8" * 64
+    root_tweet_id = "2054593377438421492"
+    follow_up_tweet_id = "2054593377438421493"
+    root_url = f"https://x.com/blockaid_/status/{root_tweet_id}"
+    follow_up_url = f"https://x.com/blockaid_/status/{follow_up_tweet_id}"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Twitter Thread Alert Candidate",
+                reference_url=root_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict[str, object]):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(self._payload).encode()
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        requested_urls.append(request.full_url)
+        if request.full_url == f"https://api.twitterapi.io/twitter/tweets?tweet_ids={root_tweet_id}":
+            return FakeResponse(
+                {
+                    "status": "success",
+                    "tweets": [
+                        {
+                            "id": root_tweet_id,
+                            "url": root_url,
+                            "text": "Community alert. More details in thread.",
+                            "replyCount": 2,
+                            "author": {"userName": "blockaid_"},
+                            "entities": {
+                                "user_mentions": [
+                                    {"screen_name": "ShapeShift", "name": "ShapeShift"},
+                                ],
+                                "urls": [],
+                            },
+                        }
+                    ],
+                }
+            )
+        if request.full_url == f"https://api.twitterapi.io/twitter/tweet/thread_context?tweetId={root_tweet_id}":
+            return FakeResponse(
+                {
+                    "status": "success",
+                    "replies": [
+                        {
+                            "id": root_tweet_id,
+                            "url": root_url,
+                            "text": "Community alert. More details in thread.",
+                            "conversationId": root_tweet_id,
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        },
+                        {
+                            "id": follow_up_tweet_id,
+                            "url": follow_up_url,
+                            "text": f"Exploit transaction: https://arbiscan.io/tx/{tx_hash}",
+                            "conversationId": root_tweet_id,
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        },
+                    ],
+                    "has_next_page": False,
+                    "next_cursor": "",
+                }
+            )
+        raise AssertionError(f"unexpected URL requested: {request.full_url}")
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_013)}
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert requested_urls == [
+        f"https://api.twitterapi.io/twitter/tweets?tweet_ids={root_tweet_id}",
+        f"https://api.twitterapi.io/twitter/tweet/thread_context?tweetId={root_tweet_id}",
+    ]
+    assert rows[0]["source_fetch_status"] == "twitterapi_io_fetched"
+    assert rows[0]["source_evidence_url"] == follow_up_url
+    assert rows[0]["source_extracted_seed_transaction_hash"] == tx_hash
+    assert rows[0]["seed_transaction_hash"] == tx_hash
+    assert rows[0]["fork_block"] == "20000013"
+    assert rows[0]["rpc_backfill_status"] == "receipt_verified"
+
+
+def test_evidence_pipeline_ignores_x_thread_context_tweets_from_other_conversations(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "twitterapi-test-key")
+    correct_tx_hash = "0x" + "a" * 64
+    unrelated_tx_hash = "0x" + "b" * 64
+    root_tweet_id = "2054593377438421492"
+    correct_tweet_id = "2054593661518610792"
+    unrelated_tweet_id = "2058372418557595890"
+    root_url = f"https://x.com/blockaid_/status/{root_tweet_id}"
+    correct_url = f"https://x.com/blockaid_/status/{correct_tweet_id}"
+    unrelated_url = f"https://x.com/blockaid_/status/{unrelated_tweet_id}"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="ShapeShift FOX Colony",
+                reference_url=root_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict[str, object]):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(self._payload).encode()
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        if request.full_url == f"https://api.twitterapi.io/twitter/tweets?tweet_ids={root_tweet_id}":
+            return FakeResponse(
+                {
+                    "status": "success",
+                    "tweets": [
+                        {
+                            "id": root_tweet_id,
+                            "url": root_url,
+                            "text": "Community alert. ShapeShift FOX Colony. More details in thread.",
+                            "conversationId": root_tweet_id,
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        }
+                    ],
+                }
+            )
+        if request.full_url == f"https://api.twitterapi.io/twitter/tweet/thread_context?tweetId={root_tweet_id}":
+            return FakeResponse(
+                {
+                    "status": "success",
+                    "tweets": [
+                        {
+                            "id": root_tweet_id,
+                            "url": root_url,
+                            "text": "Community alert. ShapeShift FOX Colony. More details in thread.",
+                            "conversationId": root_tweet_id,
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        },
+                        {
+                            "id": correct_tweet_id,
+                            "url": correct_url,
+                            "text": f"Tx: https://arbiscan.io/tx/{correct_tx_hash}",
+                            "conversationId": root_tweet_id,
+                            "inReplyToId": root_tweet_id,
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        },
+                        {
+                            "id": unrelated_tweet_id,
+                            "url": unrelated_url,
+                            "text": f"Unrelated StablR tx: https://etherscan.io/tx/{unrelated_tx_hash}",
+                            "conversationId": unrelated_tweet_id,
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        },
+                    ],
+                    "has_next_page": False,
+                    "next_cursor": "",
+                }
+            )
+        raise AssertionError(f"unexpected URL requested: {request.full_url}")
+
+    def fake_rpc_caller(_chain: str, _method: str, params: list[str]) -> dict[str, str]:
+        assert params == [correct_tx_hash]
+        return {"blockNumber": hex(20_000_015)}
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert rows[0]["source_evidence_url"] == correct_url
+    assert rows[0]["source_extracted_seed_transaction_hash"] == correct_tx_hash
+    assert rows[0]["seed_transaction_hash"] == correct_tx_hash
+    assert rows[0]["fork_block"] == "20000015"
+
+
+def test_evidence_pipeline_recovers_x_tx_from_advanced_search_when_thread_context_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    monkeypatch.setenv("TWITTERAPI_IO_KEY", "twitterapi-test-key")
+    tx_hash = "0x" + "9" * 64
+    root_tweet_id = "2054593377438421492"
+    root_url = f"https://x.com/blockaid_/status/{root_tweet_id}"
+    search_hit_url = "https://x.com/blockaid_/status/2054593377438421494"
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Twitter Search Recovery Candidate",
+                reference_url=root_url,
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+        ],
+    )
+
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+
+        def __init__(self, payload: dict[str, object]):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(self._payload).encode()
+
+    def fake_urlopen(request, timeout: float):
+        del timeout
+        requested_urls.append(request.full_url)
+        if request.full_url == f"https://api.twitterapi.io/twitter/tweets?tweet_ids={root_tweet_id}":
+            return FakeResponse(
+                {
+                    "status": "success",
+                    "tweets": [
+                        {
+                            "id": root_tweet_id,
+                            "url": root_url,
+                            "text": "Community alert. More details in thread.",
+                            "replyCount": 3,
+                            "createdAt": "Wed May 13 16:03:28 +0000 2026",
+                            "author": {"userName": "blockaid_"},
+                            "entities": {
+                                "user_mentions": [
+                                    {"screen_name": "ShapeShift", "name": "ShapeShift"},
+                                ],
+                                "urls": [],
+                            },
+                        }
+                    ],
+                }
+            )
+        if request.full_url == f"https://api.twitterapi.io/twitter/tweet/thread_context?tweetId={root_tweet_id}":
+            return FakeResponse({"status": "success", "replies": [], "has_next_page": False, "next_cursor": ""})
+        if request.full_url == f"https://api.twitterapi.io/twitter/tweet/replies?tweetId={root_tweet_id}":
+            return FakeResponse({"status": "success", "replies": [], "has_next_page": False, "next_cursor": ""})
+        if request.full_url.startswith("https://api.twitterapi.io/twitter/tweet/advanced_search?"):
+            return FakeResponse(
+                {
+                    "status": "success",
+                    "tweets": [
+                        {
+                            "id": "2054593377438421494",
+                            "url": search_hit_url,
+                            "text": f"Attack transaction located: https://arbiscan.io/tx/{tx_hash}",
+                            "author": {"userName": "blockaid_"},
+                            "entities": {"urls": []},
+                        }
+                    ],
+                    "has_next_page": False,
+                    "next_cursor": "",
+                }
+            )
+        raise AssertionError(f"unexpected URL requested: {request.full_url}")
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_014)}
+
+    monkeypatch.setattr("abra.evidence_pipeline.urllib.request.urlopen", fake_urlopen)
+    produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        rpc_caller=fake_rpc_caller,
+    )
+
+    rows = _read_csv(out_dir / "alchemy_onchain_backfill_latest.csv")
+    assert requested_urls[:3] == [
+        f"https://api.twitterapi.io/twitter/tweets?tweet_ids={root_tweet_id}",
+        f"https://api.twitterapi.io/twitter/tweet/thread_context?tweetId={root_tweet_id}",
+        f"https://api.twitterapi.io/twitter/tweet/replies?tweetId={root_tweet_id}",
+    ]
+    assert any(
+        url.startswith("https://api.twitterapi.io/twitter/tweet/advanced_search?")
+        for url in requested_urls
+    )
+    assert rows[0]["source_fetch_status"] == "twitterapi_io_fetched"
+    assert rows[0]["source_evidence_url"] == search_hit_url
+    assert rows[0]["source_extracted_seed_transaction_hash"] == tx_hash
+    assert rows[0]["seed_transaction_hash"] == tx_hash
+    assert rows[0]["fork_block"] == "20000014"
+    assert rows[0]["rpc_backfill_status"] == "receipt_verified"
+
+
 def test_evidence_pipeline_reports_missing_twitterapi_io_key_for_x_alerts(tmp_path, monkeypatch):
     monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
     monkeypatch.delenv("TWITTERAPI_IO_KEY", raising=False)
