@@ -142,6 +142,10 @@ def test_evidence_pipeline_materializes_security_enrichment_and_alchemy_backfill
         "security_evidence_json": "security_evidence_enriched_latest.json",
         "alchemy_backfill_csv": "alchemy_onchain_backfill_latest.csv",
         "alchemy_backfill_json": "alchemy_onchain_backfill_latest.json",
+        "anchored_incidents_csv": "incidents_anchored_latest.csv",
+        "anchored_incidents_json": "incidents_anchored_latest.json",
+        "candidate_backlog_csv": "incidents_candidate_backlog_latest.csv",
+        "candidate_backlog_json": "incidents_candidate_backlog_latest.json",
     }
 
     enriched_rows = _read_csv(out_dir / "security_evidence_enriched_latest.csv")
@@ -3141,3 +3145,75 @@ def test_evidence_pipeline_prioritizes_direct_sources_when_reference_fetch_budge
     assert fetched_urls == [
         "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol"
     ]
+
+
+def test_evidence_pipeline_materializes_anchored_main_set_and_backlog(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+    tx_hash = "0x" + "9" * 64
+    incidents_csv = tmp_path / "incidents_normalized_latest.csv"
+    out_dir = tmp_path / "processed"
+    _write_incidents_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Anchored Complete",
+                reference_url="https://blocksec.com/blog/anchored-complete-analysis",
+                seed_transaction_hash="0x" + "1" * 64,
+                fork_block="19000001",
+            ),
+            _incident(
+                2,
+                target="Anchored Backfilled",
+                reference_url=f"https://www.certik.com/resources/blog/anchored-backfilled?tx={tx_hash}",
+                seed_transaction_hash="",
+                fork_block="",
+            ),
+            _incident(
+                3,
+                target="Candidate Backlog Only",
+                reference_url="https://example.test/incidents/candidate-backlog-only",
+                source_url="https://hacked.slowmist.io/?c=&page=2",
+                seed_transaction_hash="",
+                fork_block="",
+                description="No anchored security report yet.",
+            ),
+        ],
+    )
+
+    def fake_rpc_caller(chain: str, method: str, params: list[str]) -> dict[str, str]:
+        assert chain == "ethereum"
+        assert method == "eth_getTransactionReceipt"
+        assert params == [tx_hash]
+        return {"blockNumber": hex(20_000_123)}
+
+    payload = produce_evidence_pipeline(
+        incidents_csv=incidents_csv,
+        out_dir=out_dir,
+        rpc_supported_chains=["ethereum"],
+        rpc_caller=fake_rpc_caller,
+    )
+
+    assert payload["summary"]["anchored_incident_count"] == 2
+    assert payload["summary"]["candidate_backlog_count"] == 1
+    assert payload["artifacts"]["anchored_incidents_csv"] == "incidents_anchored_latest.csv"
+    assert payload["artifacts"]["anchored_incidents_json"] == "incidents_anchored_latest.json"
+    assert payload["artifacts"]["candidate_backlog_csv"] == "incidents_candidate_backlog_latest.csv"
+    assert payload["artifacts"]["candidate_backlog_json"] == "incidents_candidate_backlog_latest.json"
+
+    anchored_rows = {row["slug"]: row for row in _read_csv(out_dir / "incidents_anchored_latest.csv")}
+    assert set(anchored_rows) == {"anchored-complete", "anchored-backfilled"}
+    assert anchored_rows["anchored-backfilled"]["seed_transaction_hash"] == tx_hash
+    assert anchored_rows["anchored-backfilled"]["fork_block"] == "20000123"
+    assert anchored_rows["anchored-backfilled"]["security_anchor"] == "true"
+
+    backlog_rows = _read_csv(out_dir / "incidents_candidate_backlog_latest.csv")
+    assert [row["slug"] for row in backlog_rows] == ["candidate-backlog-only"]
+    assert backlog_rows[0]["security_anchor"] == "false"
+
+    anchored_json = json.loads((out_dir / "incidents_anchored_latest.json").read_text(encoding="utf-8"))
+    assert anchored_json["stage"] == "anchored_incident_partition"
+    assert anchored_json["summary"]["anchored_incident_count"] == 2
+
+    backlog_json = json.loads((out_dir / "incidents_candidate_backlog_latest.json").read_text(encoding="utf-8"))
+    assert backlog_json["summary"]["candidate_backlog_count"] == 1

@@ -37,11 +37,16 @@ from abra.manifest import repo_root
 EVIDENCE_PIPELINE_SCHEMA_VERSION = "abra.evidence_pipeline.v1"
 SECURITY_EVIDENCE_SCHEMA_VERSION = "abra.security_evidence_enriched.v1"
 ALCHEMY_BACKFILL_SCHEMA_VERSION = "abra.alchemy_onchain_backfill.v1"
+INCIDENT_PARTITION_SCHEMA_VERSION = "abra.incident_partition.v1"
 
 SECURITY_EVIDENCE_CSV = "security_evidence_enriched_latest.csv"
 SECURITY_EVIDENCE_JSON = "security_evidence_enriched_latest.json"
 ALCHEMY_BACKFILL_CSV = "alchemy_onchain_backfill_latest.csv"
 ALCHEMY_BACKFILL_JSON = "alchemy_onchain_backfill_latest.json"
+ANCHORED_INCIDENTS_CSV = "incidents_anchored_latest.csv"
+ANCHORED_INCIDENTS_JSON = "incidents_anchored_latest.json"
+CANDIDATE_BACKLOG_CSV = "incidents_candidate_backlog_latest.csv"
+CANDIDATE_BACKLOG_JSON = "incidents_candidate_backlog_latest.json"
 
 SECURITY_EVIDENCE_FIELDS = [
     "incident_id",
@@ -95,6 +100,35 @@ ALCHEMY_BACKFILL_FIELDS = [
     "rpc_backfill_status",
     "reference_url",
     "security_report_sources",
+]
+
+INCIDENT_PARTITION_EXTRA_FIELDS = [
+    "slug",
+    "chain_id",
+    "candidate_discovery_sources",
+    "security_report_sources",
+    "security_source_name",
+    "security_source_url",
+    "security_anchor",
+    "confidence",
+    "evidence_gap",
+    "rpc_provider",
+    "rpc_env",
+    "rpc_supported",
+    "backfill_status",
+    "missing_onchain_fields",
+    "source_fetch_status",
+    "source_evidence_url",
+    "source_extracted_seed_transaction_hash",
+    "source_extracted_block",
+    "anchor_discovery_status",
+    "anchor_discovery_url",
+    "anchor_discovery_seed_transaction_hash",
+    "anchor_discovery_block",
+    "anchor_discovery_attempt_count",
+    "anchor_discovery_timeout_count",
+    "anchor_discovery_result_statuses",
+    "rpc_backfill_status",
 ]
 
 SourceFetcher = Callable[..., dict[str, str]]
@@ -190,6 +224,45 @@ def produce_evidence_pipeline(
             "rows": backfill_rows,
         },
     )
+    incident_partition = _partition_incident_rows(incident_rows, enriched_rows, backfill_rows)
+    _write_csv(
+        out_path / ANCHORED_INCIDENTS_CSV,
+        incident_partition["anchored_rows"],
+        incident_partition["fieldnames"],
+    )
+    _write_json(
+        out_path / ANCHORED_INCIDENTS_JSON,
+        {
+            "schema_version": INCIDENT_PARTITION_SCHEMA_VERSION,
+            "stage": "anchored_incident_partition",
+            "partition": "anchored_main_set",
+            "generated_at": generated_at,
+            "source_incidents_csv": str(incidents_path),
+            "source_security_evidence_csv": SECURITY_EVIDENCE_CSV,
+            "source_alchemy_backfill_csv": ALCHEMY_BACKFILL_CSV,
+            "summary": incident_partition["summary"],
+            "rows": incident_partition["anchored_rows"],
+        },
+    )
+    _write_csv(
+        out_path / CANDIDATE_BACKLOG_CSV,
+        incident_partition["backlog_rows"],
+        incident_partition["fieldnames"],
+    )
+    _write_json(
+        out_path / CANDIDATE_BACKLOG_JSON,
+        {
+            "schema_version": INCIDENT_PARTITION_SCHEMA_VERSION,
+            "stage": "anchored_incident_partition",
+            "partition": "candidate_backlog",
+            "generated_at": generated_at,
+            "source_incidents_csv": str(incidents_path),
+            "source_security_evidence_csv": SECURITY_EVIDENCE_CSV,
+            "source_alchemy_backfill_csv": ALCHEMY_BACKFILL_CSV,
+            "summary": incident_partition["summary"],
+            "rows": incident_partition["backlog_rows"],
+        },
+    )
 
     errors: list[str] = []
     if rpc_state["missing_configuration_error"]:
@@ -206,6 +279,7 @@ def produce_evidence_pipeline(
             "alchemy_backfill_candidate_count": len(backfill_rows),
             **backfill_summary,
             "security_anchored_count": security_summary["security_anchored_count"],
+            **incident_partition["summary"],
         },
         "errors": errors,
         "artifacts": {
@@ -213,6 +287,10 @@ def produce_evidence_pipeline(
             "security_evidence_json": SECURITY_EVIDENCE_JSON,
             "alchemy_backfill_csv": ALCHEMY_BACKFILL_CSV,
             "alchemy_backfill_json": ALCHEMY_BACKFILL_JSON,
+            "anchored_incidents_csv": ANCHORED_INCIDENTS_CSV,
+            "anchored_incidents_json": ANCHORED_INCIDENTS_JSON,
+            "candidate_backlog_csv": CANDIDATE_BACKLOG_CSV,
+            "candidate_backlog_json": CANDIDATE_BACKLOG_JSON,
         },
     }
 
@@ -463,6 +541,135 @@ def _evidence_quality_errors(backfill_summary: dict[str, int]) -> list[str]:
     if backfill_summary.get("x_source_fetch_exhausted_count", 0) > 0 and complete == 0:
         errors.append("x_source_fetch_exhausted_without_onchain_anchor")
     return errors
+
+
+def _partition_incident_rows(
+    incident_rows: list[dict[str, str]],
+    enriched_rows: list[dict[str, str]],
+    backfill_rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    enriched_by_id = {row.get("incident_id", ""): row for row in enriched_rows if row.get("incident_id")}
+    backfill_by_id = {row.get("incident_id", ""): row for row in backfill_rows if row.get("incident_id")}
+
+    anchored_rows: list[dict[str, str]] = []
+    backlog_rows: list[dict[str, str]] = []
+    for incident_row in incident_rows:
+        incident_id = incident_row.get("incident_id") or _sha1(
+            [incident_row.get("target", ""), incident_row.get("event_date", "")]
+        )
+        merged_row = _merge_incident_partition_row(
+            incident_row,
+            security_stage=enriched_by_id.get(incident_id, {}),
+            backfill_stage=backfill_by_id.get(incident_id, {}),
+        )
+        if merged_row.get("security_anchor") == "true":
+            anchored_rows.append(merged_row)
+        else:
+            backlog_rows.append(merged_row)
+
+    summary = {
+        "anchored_incident_count": len(anchored_rows),
+        "candidate_backlog_count": len(backlog_rows),
+        "anchored_onchain_complete_count": sum(
+            1 for row in anchored_rows if row.get("seed_transaction_hash") and row.get("fork_block")
+        ),
+        "anchored_backfill_required_count": sum(
+            1 for row in anchored_rows if not (row.get("seed_transaction_hash") and row.get("fork_block"))
+        ),
+        "candidate_backlog_missing_security_anchor_count": sum(
+            1 for row in backlog_rows if row.get("security_anchor") != "true"
+        ),
+    }
+    fieldnames = _incident_partition_fieldnames(incident_rows, anchored_rows, backlog_rows)
+    return {
+        "anchored_rows": anchored_rows,
+        "backlog_rows": backlog_rows,
+        "summary": summary,
+        "fieldnames": fieldnames,
+    }
+
+
+def _merge_incident_partition_row(
+    incident_row: dict[str, str],
+    *,
+    security_stage: dict[str, str],
+    backfill_stage: dict[str, str],
+) -> dict[str, str]:
+    merged = dict(incident_row)
+    incident_id = incident_row.get("incident_id") or security_stage.get("incident_id") or _sha1(
+        [incident_row.get("target", ""), incident_row.get("event_date", "")]
+    )
+    merged["incident_id"] = incident_id
+    merged["slug"] = security_stage.get("slug") or slugify(
+        incident_row.get("slug") or incident_row.get("target") or incident_row.get("incident") or "incident"
+    )
+    merged["chain"] = security_stage.get("chain") or infer_chain(incident_row)
+    merged["chain_id"] = security_stage.get("chain_id") or (
+        "" if chain_id(merged["chain"]) is None else str(chain_id(merged["chain"]))
+    )
+    merged["reference_url"] = incident_row.get("reference_url") or security_stage.get("reference_url") or ""
+    merged["source_url"] = incident_row.get("source_url") or security_stage.get("source_url") or ""
+    merged["seed_transaction_hash"] = (
+        backfill_stage.get("seed_transaction_hash")
+        or security_stage.get("seed_transaction_hash")
+        or incident_row.get("seed_transaction_hash")
+        or ""
+    )
+    merged["fork_block"] = (
+        backfill_stage.get("fork_block")
+        or security_stage.get("fork_block")
+        or incident_row.get("fork_block")
+        or incident_row.get("replay_block")
+        or ""
+    )
+    for field in (
+        "candidate_discovery_sources",
+        "security_report_sources",
+        "security_source_name",
+        "security_source_url",
+        "security_anchor",
+        "confidence",
+        "evidence_gap",
+    ):
+        merged[field] = security_stage.get(field, "")
+    for field in (
+        "rpc_provider",
+        "rpc_env",
+        "rpc_supported",
+        "backfill_status",
+        "missing_onchain_fields",
+        "source_fetch_status",
+        "source_evidence_url",
+        "source_extracted_seed_transaction_hash",
+        "source_extracted_block",
+        "anchor_discovery_status",
+        "anchor_discovery_url",
+        "anchor_discovery_seed_transaction_hash",
+        "anchor_discovery_block",
+        "anchor_discovery_attempt_count",
+        "anchor_discovery_timeout_count",
+        "anchor_discovery_result_statuses",
+        "rpc_backfill_status",
+    ):
+        merged[field] = backfill_stage.get(field, "")
+    return merged
+
+
+def _incident_partition_fieldnames(
+    original_rows: list[dict[str, str]],
+    anchored_rows: list[dict[str, str]],
+    backlog_rows: list[dict[str, str]],
+) -> list[str]:
+    ordered: list[str] = []
+    for rows in (original_rows, anchored_rows, backlog_rows):
+        for row in rows:
+            for field in row.keys():
+                if field not in ordered:
+                    ordered.append(field)
+    for field in INCIDENT_PARTITION_EXTRA_FIELDS:
+        if field not in ordered:
+            ordered.append(field)
+    return ordered
 
 
 def _prioritized_reference_fetch_ids(

@@ -63,8 +63,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate incident replay cards in markdown")
     parser.add_argument(
         "--incidents-csv",
-        default="data/processed/incidents_normalized_latest.csv",
-        help="Input normalized incidents CSV",
+        default="data/processed/incidents_anchored_latest.csv",
+        help="Input anchored incidents CSV",
     )
     parser.add_argument(
         "--output-dir",

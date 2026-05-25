@@ -33,6 +33,7 @@ from abra.evidence_sources import (
 )
 from abra.evidence_pipeline import (
     ALCHEMY_BACKFILL_CSV,
+    ANCHORED_INCIDENTS_CSV,
     SECURITY_EVIDENCE_CSV,
     produce_evidence_pipeline,
 )
@@ -69,9 +70,12 @@ OPERATIONAL_FAMILIES = {
     "supply_chain",
 }
 
+DEFAULT_ANCHORED_INCIDENTS_PATH = f"data/processed/{ANCHORED_INCIDENTS_CSV}"
+DEFAULT_NORMALIZED_INCIDENTS_PATH = "data/processed/incidents_normalized_latest.csv"
+
 def build_replay_cohort(
     *,
-    incidents_csv: str | Path = "data/processed/incidents_normalized_latest.csv",
+    incidents_csv: str | Path = DEFAULT_ANCHORED_INCIDENTS_PATH,
     selected_incidents_csv: str | Path | None = None,
     replay_results_csv: str | Path = "data/processed/replay_results.csv",
     event_cards_dir: str | Path = "reports/events",
@@ -109,7 +113,15 @@ def build_replay_cohort(
     if refresh:
         _run_phase1_refresh(root, refresh_start_page, refresh_end_page, refresh_top_protocols)
 
-    incidents_path = _resolve_repo_path(root, incidents_csv)
+    incidents_path = _resolve_incidents_source_path(
+        root,
+        incidents_csv,
+        rpc_provider=rpc_provider,
+        rpc_supported_chains=rpc_supported_chains,
+        source_fetcher=source_fetcher,
+        anchor_searcher=anchor_searcher,
+        rpc_caller=rpc_caller,
+    )
     produce_evidence_pipeline(
         incidents_csv=incidents_path,
         out_dir=incidents_path.parent,
@@ -296,6 +308,44 @@ def _run_phase1_refresh(root: Path, start_page: int, end_page: int, top_protocol
         str(top_protocols),
     ]
     subprocess.run(cmd, cwd=str(root), check=True)
+
+
+def _resolve_incidents_source_path(
+    root: Path,
+    incidents_csv: str | Path,
+    *,
+    rpc_provider: str,
+    rpc_supported_chains: list[str] | None,
+    source_fetcher: Callable[[str], dict[str, str]] | None,
+    anchor_searcher: Callable[[dict[str, str]], list[dict[str, str]]] | None,
+    rpc_caller: Callable[[str, str, list[str]], dict[str, Any]] | None,
+) -> Path:
+    incidents_path = _resolve_repo_path(root, incidents_csv)
+    if incidents_path.exists():
+        return incidents_path
+    if not _uses_default_anchored_incidents_path(incidents_csv):
+        raise FileNotFoundError(f"Incident CSV not found: {incidents_path}")
+
+    normalized_path = _resolve_repo_path(root, DEFAULT_NORMALIZED_INCIDENTS_PATH)
+    if not normalized_path.exists():
+        raise FileNotFoundError(f"Incident CSV not found: {incidents_path}")
+
+    produce_evidence_pipeline(
+        incidents_csv=normalized_path,
+        out_dir=normalized_path.parent,
+        rpc_provider=rpc_provider,
+        rpc_supported_chains=rpc_supported_chains,
+        source_fetcher=source_fetcher,
+        anchor_searcher=anchor_searcher,
+        rpc_caller=rpc_caller,
+    )
+    if incidents_path.exists():
+        return incidents_path
+    raise FileNotFoundError(f"Incident CSV not found: {incidents_path}")
+
+
+def _uses_default_anchored_incidents_path(value: str | Path) -> bool:
+    return Path(value) == Path(DEFAULT_ANCHORED_INCIDENTS_PATH)
 
 
 def _resolve_repo_path(root: Path, value: str | Path) -> Path:

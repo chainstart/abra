@@ -122,8 +122,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Select high-priority incidents for Phase-2")
     parser.add_argument(
         "--incidents-csv",
-        default="data/processed/incidents_normalized_latest.csv",
-        help="Input normalized incidents csv",
+        default="data/processed/incidents_anchored_latest.csv",
+        help="Input anchored incidents csv",
     )
     parser.add_argument(
         "--output-csv",
@@ -171,4 +171,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

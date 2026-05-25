@@ -6,7 +6,8 @@ This folder implements the first execution phase of the research plan:
 2. Ingest protocol/chain snapshots from `api.llama.fi`
 3. Ingest direct evidence candidates from replay- and tx-oriented sources
 4. Normalize data for downstream analysis and experiments
-5. Generate a quality report for coverage, source mix, and onchain-anchor missingness checks
+5. Partition incidents into an anchored main set and a candidate backlog
+6. Generate a quality report for coverage, source mix, and onchain-anchor missingness checks
 
 ## Scripts
 
@@ -35,10 +36,10 @@ python3 tools/pipeline/run_phase1.py --start-page 1 --end-page 102 --top-protoco
 # Direct evidence only
 python3 tools/pipeline/direct_evidence_collector.py --max-defihacklabs 250
 
-# Generate replay cards for top DeFi incidents by loss
+# Generate replay cards from the anchored main set
 python3 tools/pipeline/generate_event_cards.py --top-n 50
 
-# Select a high-priority replay batch and generate its cards
+# Select a high-priority replay batch from the anchored main set and generate its cards
 python3 tools/pipeline/select_phase2_incidents.py
 python3 tools/pipeline/generate_event_cards.py \
   --selected-incidents-csv data/processed/phase2_batch1_incidents.csv \
@@ -60,6 +61,8 @@ before running the pipeline.
 - Raw protocol snapshots: `data/raw/defillama/`
 - Raw direct evidence snapshots: `data/raw/direct_evidence/`
 - Normalized tables: `data/processed/`
+- Anchored main set: `data/processed/incidents_anchored_latest.csv`
+- Candidate backlog: `data/processed/incidents_candidate_backlog_latest.csv`
 - Data quality report: `reports/17_phase1_data_quality.md`
 - Incident replay cards: `reports/events/`
 
@@ -78,3 +81,12 @@ before running the pipeline.
 - `source_url`, `source_page`, `category_filter`: provenance fields
 - `seed_transaction_hash`, `fork_block`: direct onchain anchor fields preserved from direct evidence sources
 - `description`: event description
+
+## Anchored-First Outputs
+
+After `python3 -m abra evidence produce` runs inside `run_phase1.py`, ABRA materializes:
+
+- `incidents_anchored_latest.csv/json`: the main experiment set, containing incidents with anchored security evidence
+- `incidents_candidate_backlog_latest.csv/json`: candidates that still lack anchored security evidence and should not become default replay inputs
+
+Downstream defaults such as `select_phase2_incidents.py` and `generate_event_cards.py` now consume the anchored main set instead of the raw normalized pool.

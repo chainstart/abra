@@ -101,8 +101,8 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_cohort = replay_sub.add_parser("cohort", help="Build a validated public incident replay cohort.")
     replay_cohort.add_argument(
         "--incidents-csv",
-        default="data/processed/incidents_normalized_latest.csv",
-        help="Normalized incident CSV produced by the ABRA phase-1 pipeline.",
+        default="data/processed/incidents_anchored_latest.csv",
+        help="Anchored incident CSV produced by the ABRA phase-1 evidence pipeline.",
     )
     replay_cohort.add_argument(
         "--selected-incidents-csv",
@@ -194,7 +194,11 @@ def _build_parser() -> argparse.ArgumentParser:
     evidence_produce.add_argument(
         "--out-dir",
         default="data/processed",
-        help="Directory for security_evidence_enriched_latest.* and alchemy_onchain_backfill_latest.*.",
+        help=(
+            "Directory for security_evidence_enriched_latest.*, "
+            "alchemy_onchain_backfill_latest.*, incidents_anchored_latest.*, "
+            "and incidents_candidate_backlog_latest.*."
+        ),
     )
     evidence_produce.add_argument(
         "--rpc-provider",

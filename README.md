@@ -115,16 +115,21 @@ python3 tools/pipeline/run_phase1.py --start-page 1 --end-page 3 --top-protocols
 # - data/raw/defillama/
 # - data/raw/direct_evidence/
 # - data/processed/
+#   - incidents_normalized_latest.csv
+#   - security_evidence_enriched_latest.csv/json
+#   - alchemy_onchain_backfill_latest.csv/json
+#   - incidents_anchored_latest.csv/json
+#   - incidents_candidate_backlog_latest.csv/json
 # - reports/17_phase1_data_quality.md
 
-# Generate top incident replay cards
+# Generate top replay cards from the anchored main set
 python3 tools/pipeline/generate_event_cards.py --top-n 50
 ```
 
 ### Run Phase-2 Shortlisting And Replay Skeleton
 
 ```bash
-# Select the first replay batch from normalized incidents
+# Select the first replay batch from the anchored main set
 python3 tools/pipeline/select_phase2_incidents.py
 
 # Generate replay cards for the selected batch
@@ -205,6 +210,10 @@ Stage outputs:
 - `data/processed/security_evidence_enriched_latest.json`
 - `data/processed/alchemy_onchain_backfill_latest.csv`
 - `data/processed/alchemy_onchain_backfill_latest.json`
+- `data/processed/incidents_anchored_latest.csv`
+- `data/processed/incidents_anchored_latest.json`
+- `data/processed/incidents_candidate_backlog_latest.csv`
+- `data/processed/incidents_candidate_backlog_latest.json`
 - `runs/abra_evidence/cohort/manifest.json`
 - `runs/abra_evidence/cohort/exclusion_log.json`
 - `runs/abra_evidence/cohort/stage_ledger.json`

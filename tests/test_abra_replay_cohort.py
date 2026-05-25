@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import abra.replay_cohort as replay_cohort_module
 from abra.replay_cohort import build_replay_cohort
 
 
@@ -862,3 +863,48 @@ def test_replay_cohort_cli_accepts_explicit_no_backfill_switch(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["status"] == "passed"
     assert payload["case_count"] == 1
+
+
+def test_replay_cohort_defaults_to_anchored_phase1_output(tmp_path, monkeypatch):
+    processed_dir = tmp_path / "data" / "processed"
+    incidents_csv = processed_dir / "incidents_normalized_latest.csv"
+    _write_csv(
+        incidents_csv,
+        [
+            _incident(
+                1,
+                target="Anchored Default Candidate",
+                reference_url="https://www.certik.com/resources/blog/anchored-default-candidate",
+                seed_transaction_hash="0x" + "1" * 64,
+                fork_block="19000001",
+            ),
+            _incident(
+                2,
+                target="Unanchored Default Candidate",
+                reference_url="https://example.test/incidents/unanchored-default-candidate",
+                source_url="https://hacked.slowmist.io/?c=&page=1",
+                seed_transaction_hash="",
+                fork_block="",
+                description="Candidate without anchored security evidence.",
+            ),
+        ],
+    )
+
+    monkeypatch.setattr(replay_cohort_module, "repo_root", lambda: tmp_path)
+    monkeypatch.setenv("ALCHEMY_API_KEY", "alchemy-test-key")
+
+    payload = build_replay_cohort(
+        out="runs/abra_sufficiency/cohort",
+        min_cases=1,
+        max_cases=1,
+        evm_only=True,
+        require_seed_transaction_hash=True,
+        require_replay_block=True,
+        rpc_supported_chains=["ethereum"],
+    )
+
+    assert payload["status"] == "passed"
+    manifest = json.loads((tmp_path / "runs" / "abra_sufficiency" / "cohort" / "manifest.json").read_text(encoding="utf-8"))
+    assert [case["slug"] for case in manifest["cases"]] == ["anchored-default-candidate"]
+    assert manifest["source_incidents_csv"].endswith("data/processed/incidents_anchored_latest.csv")
+    assert (processed_dir / "incidents_anchored_latest.csv").exists()
