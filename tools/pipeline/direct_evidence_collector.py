@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import json
 import os
 import re
@@ -12,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -26,17 +28,28 @@ from common import ensure_dir, now_utc_iso, write_csv, write_json
 DEFIHACKLABS_REPO_ROOT = "https://github.com/SunWeb3Sec/DeFiHackLabs"
 DEFIHACKLABS_TREE_URL = "https://api.github.com/repos/SunWeb3Sec/DeFiHackLabs/git/trees/main?recursive=1"
 DEFIHACKLABS_CONTENTS_URL = "https://api.github.com/repos/SunWeb3Sec/DeFiHackLabs/contents/{path}?ref=main"
+DEFIHACKLABS_HTML_URL = "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/{path}"
+DEFIHACKLABS_RAW_URL = "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/{path}"
 USER_AGENT = "abra-direct-evidence/1.0"
 GITHUB_API_VERSION = "2022-11-28"
+DEFAULT_DIRECT_EVIDENCE_WORKERS = 16
+DEFAULT_GITHUB_API_TIMEOUT_SECONDS = 30.0
+DEFAULT_GITHUB_RAW_TIMEOUT_SECONDS = 5.0
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
     request = Request(url, headers=_github_headers())
-    with urlopen(request, timeout=30) as response:
+    with urlopen(request, timeout=_api_timeout_seconds()) as response:
         payload = json.loads(response.read().decode("utf-8", errors="replace"))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected JSON object from {url}")
     return payload
+
+
+def _fetch_text(url: str) -> str:
+    request = Request(url, headers=_github_raw_headers())
+    with urlopen(request, timeout=_raw_timeout_seconds()) as response:
+        return response.read().decode("utf-8", errors="replace")
 
 
 def _github_headers() -> dict[str, str]:
@@ -51,6 +64,18 @@ def _github_headers() -> dict[str, str]:
     return headers
 
 
+def _github_raw_headers() -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "text/plain",
+    }
+    token = _github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+@lru_cache(maxsize=1)
 def _github_token() -> str:
     for env_name in ("GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
         token = os.environ.get(env_name, "").strip()
@@ -86,6 +111,23 @@ def fetch_defihacklabs_tree() -> list[dict[str, str]]:
 
 
 def fetch_defihacklabs_fixture(path: str) -> dict[str, str]:
+    html_url = DEFIHACKLABS_HTML_URL.format(path=path)
+    download_url = DEFIHACKLABS_RAW_URL.format(path=path)
+    try:
+        decoded = _fetch_text(download_url)
+    except Exception as exc:
+        if not _should_fallback_to_contents_api(exc):
+            raise
+        return _fetch_defihacklabs_fixture_via_contents_api(path)
+    return {
+        "path": path,
+        "html_url": html_url,
+        "download_url": download_url,
+        "content": decoded,
+    }
+
+
+def _fetch_defihacklabs_fixture_via_contents_api(path: str) -> dict[str, str]:
     payload = _fetch_json(DEFIHACKLABS_CONTENTS_URL.format(path=path))
     content = str(payload.get("content") or "")
     encoding = str(payload.get("encoding") or "")
@@ -95,10 +137,37 @@ def fetch_defihacklabs_fixture(path: str) -> dict[str, str]:
         decoded = content
     return {
         "path": str(payload.get("path") or path),
-        "html_url": str(payload.get("html_url") or ""),
-        "download_url": str(payload.get("download_url") or ""),
+        "html_url": str(payload.get("html_url") or DEFIHACKLABS_HTML_URL.format(path=path)),
+        "download_url": str(payload.get("download_url") or DEFIHACKLABS_RAW_URL.format(path=path)),
         "content": decoded,
     }
+
+
+def _should_fallback_to_contents_api(exc: Exception) -> bool:
+    if isinstance(exc, URLError):
+        return True
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, HTTPError):
+        return exc.code in {403, 408, 409, 425, 429, 500, 502, 503, 504}
+    return isinstance(exc, OSError)
+
+
+def _api_timeout_seconds() -> float:
+    return _timeout_from_env("ABRA_GITHUB_API_TIMEOUT_SECONDS", DEFAULT_GITHUB_API_TIMEOUT_SECONDS)
+
+
+def _raw_timeout_seconds() -> float:
+    return _timeout_from_env("ABRA_GITHUB_RAW_TIMEOUT_SECONDS", DEFAULT_GITHUB_RAW_TIMEOUT_SECONDS)
+
+
+def _timeout_from_env(env_name: str, default: float) -> float:
+    raw = os.environ.get(env_name, "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        value = default
+    return max(0.5, min(value, 60.0))
 
 
 def collect_direct_evidence(output_dir: Path, max_defihacklabs: int = 250) -> dict[str, Any]:
@@ -154,24 +223,66 @@ def _collect_defihacklabs_rows(*, max_fixtures: int) -> tuple[list[dict[str, str
             return rows, "rate_limited", _format_rate_limit_warning(exc, DEFIHACKLABS_TREE_URL)
         raise
 
-    for item in items:
-        path = str(item.get("path") or "")
-        if not _is_defihacklabs_exploit_fixture(path):
-            continue
-        try:
-            fixture = fetch_defihacklabs_fixture(path)
-        except HTTPError as exc:
-            if _is_github_rate_limit_error(exc):
-                collection_status = "rate_limited"
-                collection_warning = _format_rate_limit_warning(exc, path)
-                break
-            raise
-        parsed = _parse_defihacklabs_fixture(fixture)
-        if parsed:
-            rows.append(parsed)
-        if len(rows) >= max_fixtures:
+    fixture_paths = [str(item.get("path") or "") for item in items if _is_defihacklabs_exploit_fixture(str(item.get("path") or ""))]
+    workers = _direct_evidence_workers()
+    cursor = 0
+
+    while cursor < len(fixture_paths) and len(rows) < max_fixtures:
+        remaining = max_fixtures - len(rows)
+        batch_span = min(len(fixture_paths) - cursor, max(remaining, workers * 2))
+        batch_paths = fixture_paths[cursor : cursor + batch_span]
+        cursor += batch_span
+        batch_rows, batch_status, batch_warning = _collect_defihacklabs_batch(
+            batch_paths,
+            max_rows=remaining,
+            workers=workers,
+        )
+        rows.extend(batch_rows)
+        if batch_status != "complete":
+            collection_status = batch_status
+            collection_warning = batch_warning
             break
-    return rows, collection_status, collection_warning
+    return rows[:max_fixtures], collection_status, collection_warning
+
+
+def _collect_defihacklabs_batch(
+    paths: list[str],
+    *,
+    max_rows: int,
+    workers: int,
+) -> tuple[list[dict[str, str]], str, str]:
+    rows: list[dict[str, str]] = []
+    if not paths or max_rows <= 0:
+        return rows, "complete", ""
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
+        future_entries = [(path, executor.submit(fetch_defihacklabs_fixture, path)) for path in paths]
+        for path, future in future_entries:
+            try:
+                fixture = future.result()
+            except HTTPError as exc:
+                if _is_github_rate_limit_error(exc):
+                    for _pending_path, pending_future in future_entries:
+                        pending_future.cancel()
+                    return rows, "rate_limited", _format_rate_limit_warning(exc, path)
+                raise
+            parsed = _parse_defihacklabs_fixture(fixture)
+            if parsed:
+                rows.append(parsed)
+                if len(rows) >= max_rows:
+                    for _pending_path, pending_future in future_entries:
+                        pending_future.cancel()
+                    break
+    return rows, "complete", ""
+
+
+def _direct_evidence_workers() -> int:
+    raw = os.environ.get("ABRA_DIRECT_EVIDENCE_WORKERS", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_DIRECT_EVIDENCE_WORKERS
+    except ValueError:
+        value = DEFAULT_DIRECT_EVIDENCE_WORKERS
+    return max(1, min(value, 32))
 
 
 def _is_github_rate_limit_error(exc: HTTPError) -> bool:

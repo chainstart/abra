@@ -2100,8 +2100,8 @@ def test_direct_evidence_collector_adds_github_auth_headers_when_token_is_availa
     monkeypatch.setenv("GITHUB_TOKEN", "gh-test-token")
 
     class FakeResponse:
-        def __init__(self, payload: dict[str, object]) -> None:
-            self._payload = json.dumps(payload).encode("utf-8")
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
 
         def read(self) -> bytes:
             return self._payload
@@ -2117,18 +2117,10 @@ def test_direct_evidence_collector_adds_github_auth_headers_when_token_is_availa
     def fake_urlopen(request, timeout: float):
         seen_auth_headers.append(request.get_header("Authorization"))
         if request.full_url == collector.DEFIHACKLABS_TREE_URL:
-            return FakeResponse({"tree": [{"path": "src/test/2026-01/MTToken_exp.sol"}]})
-        if request.full_url == collector.DEFIHACKLABS_CONTENTS_URL.format(path="src/test/2026-01/MTToken_exp.sol"):
+            return FakeResponse(json.dumps({"tree": [{"path": "src/test/2026-01/MTToken_exp.sol"}]}).encode("utf-8"))
+        if request.full_url == collector.DEFIHACKLABS_RAW_URL.format(path="src/test/2026-01/MTToken_exp.sol"):
             return FakeResponse(
-                {
-                    "path": "src/test/2026-01/MTToken_exp.sol",
-                    "html_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
-                    "download_url": "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol",
-                    "encoding": "base64",
-                    "content": base64.b64encode(
-                        b'// Attack Tx (BSC): https://bscscan.com/tx/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
-                    ).decode("ascii"),
-                }
+                b'// Attack Tx (BSC): https://bscscan.com/tx/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
             )
         raise AssertionError(request.full_url)
 
@@ -2138,6 +2130,29 @@ def test_direct_evidence_collector_adds_github_auth_headers_when_token_is_availa
 
     assert summary["direct_candidate_count"] == 1
     assert seen_auth_headers == ["Bearer gh-test-token", "Bearer gh-test-token"]
+
+
+def test_direct_evidence_collector_caches_git_credential_token_lookup(monkeypatch):
+    collector = _load_pipeline_module("direct_evidence_collector")
+    monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+
+    calls: list[list[str]] = []
+
+    class FakeCompletedProcess:
+        stdout = "protocol=https\nhost=github.com\nusername=codex\npassword=gh-cached-token\n"
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(collector.subprocess, "run", fake_run)
+
+    assert collector._github_headers()["Authorization"] == "Bearer gh-cached-token"
+    assert collector._github_raw_headers()["Authorization"] == "Bearer gh-cached-token"
+    assert collector._github_token() == "gh-cached-token"
+    assert calls == [["git", "credential", "fill"]]
 
 
 def test_direct_evidence_collector_keeps_partial_rows_when_github_rate_limit_hits(tmp_path, monkeypatch):
@@ -2166,7 +2181,7 @@ contract MTExploitTest is Test {
                 """,
             }
         raise HTTPError(
-            collector.DEFIHACKLABS_CONTENTS_URL.format(path=path),
+            collector.DEFIHACKLABS_RAW_URL.format(path=path),
             403,
             "Forbidden",
             {"X-RateLimit-Remaining": "0"},
@@ -2199,6 +2214,107 @@ def test_direct_evidence_collector_cli_help_runs_as_script():
 
     assert completed.returncode == 0
     assert "Collect direct evidence candidates" in completed.stdout
+
+
+def test_direct_evidence_collector_fetches_fixture_from_raw_github_url(monkeypatch):
+    collector = _load_pipeline_module("direct_evidence_collector")
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    seen_urls: list[str] = []
+
+    def fake_urlopen(request, timeout: float):
+        seen_urls.append(request.full_url)
+        return FakeResponse(b"// fixture body")
+
+    monkeypatch.setattr(collector, "urlopen", fake_urlopen)
+
+    fixture = collector.fetch_defihacklabs_fixture("src/test/2026-01/MTToken_exp.sol")
+
+    assert fixture["download_url"] == (
+        "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol"
+    )
+    assert fixture["html_url"] == (
+        "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol"
+    )
+    assert fixture["content"] == "// fixture body"
+    assert seen_urls == [
+        "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol"
+    ]
+
+
+def test_direct_evidence_collector_falls_back_to_contents_api_when_raw_github_unreachable(monkeypatch):
+    collector = _load_pipeline_module("direct_evidence_collector")
+
+    class FakeResponse:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    seen_urls: list[str] = []
+
+    def fake_urlopen(request, timeout: float):
+        seen_urls.append(request.full_url)
+        if request.full_url == collector.DEFIHACKLABS_RAW_URL.format(path="src/test/2026-01/MTToken_exp.sol"):
+            raise HTTPError(request.full_url, 504, "Gateway Timeout", {}, io.BytesIO(b""))
+        if request.full_url == collector.DEFIHACKLABS_CONTENTS_URL.format(path="src/test/2026-01/MTToken_exp.sol"):
+            payload = {
+                "path": "src/test/2026-01/MTToken_exp.sol",
+                "html_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+                "download_url": "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol",
+                "encoding": "base64",
+                "content": base64.b64encode(b"// contents fallback body").decode("ascii"),
+            }
+            return FakeResponse(json.dumps(payload).encode("utf-8"))
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(collector, "urlopen", fake_urlopen)
+
+    fixture = collector.fetch_defihacklabs_fixture("src/test/2026-01/MTToken_exp.sol")
+
+    assert fixture["content"] == "// contents fallback body"
+    assert seen_urls == [
+        "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol",
+        "https://api.github.com/repos/SunWeb3Sec/DeFiHackLabs/contents/src/test/2026-01/MTToken_exp.sol?ref=main",
+    ]
+
+
+def test_run_phase1_uses_bounded_direct_evidence_default(monkeypatch):
+    run_phase1 = _load_pipeline_module("run_phase1")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(run_phase1, "ensure_repo_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run_phase1, "run_cmd", lambda cmd, cwd: commands.append(cmd))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_phase1.py", "--start-page", "1", "--end-page", "1", "--top-protocols", "10"],
+    )
+
+    run_phase1.main()
+
+    direct_cmd = commands[2]
+    max_index = direct_cmd.index("--max-defihacklabs")
+    assert direct_cmd[max_index + 1] == "40"
 
 
 def test_normalize_preserves_direct_evidence_seed_tx_and_fork_block(tmp_path):

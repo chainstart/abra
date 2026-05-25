@@ -14,6 +14,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from abra.runtime_bootstrap import ensure_repo_runtime
 
+DEFAULT_PHASE1_MAX_DEFIHACKLABS = 40
+
 
 def run_cmd(cmd: list[str], cwd: Path) -> None:
     """Run command and fail fast on non-zero exit."""
@@ -28,7 +30,12 @@ def main() -> None:
     parser.add_argument("--category", default="", help="SlowMist category filter")
     parser.add_argument("--delay-seconds", type=float, default=0.15, help="SlowMist request delay")
     parser.add_argument("--top-protocols", type=int, default=400, help="Top N protocols from DefiLlama")
-    parser.add_argument("--max-defihacklabs", type=int, default=250, help="Max DeFiHackLabs replay fixtures to ingest")
+    parser.add_argument(
+        "--max-defihacklabs",
+        type=int,
+        default=DEFAULT_PHASE1_MAX_DEFIHACKLABS,
+        help="Max DeFiHackLabs replay fixtures to ingest",
+    )
     parser.add_argument("--save-html", action="store_true", help="Persist raw SlowMist HTML pages")
     args = parser.parse_args()
     ensure_repo_runtime(REPO_ROOT, required_modules=("requests", "bs4"))
