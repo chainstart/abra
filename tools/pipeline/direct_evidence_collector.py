@@ -6,27 +6,75 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from abra.chain_support import load_local_environment
 from common import ensure_dir, now_utc_iso, write_csv, write_json
 
 DEFIHACKLABS_REPO_ROOT = "https://github.com/SunWeb3Sec/DeFiHackLabs"
 DEFIHACKLABS_TREE_URL = "https://api.github.com/repos/SunWeb3Sec/DeFiHackLabs/git/trees/main?recursive=1"
 DEFIHACKLABS_CONTENTS_URL = "https://api.github.com/repos/SunWeb3Sec/DeFiHackLabs/contents/{path}?ref=main"
 USER_AGENT = "abra-direct-evidence/1.0"
+GITHUB_API_VERSION = "2022-11-28"
 
 
 def _fetch_json(url: str) -> dict[str, Any]:
-    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    request = Request(url, headers=_github_headers())
     with urlopen(request, timeout=30) as response:
         payload = json.loads(response.read().decode("utf-8", errors="replace"))
     if not isinstance(payload, dict):
         raise ValueError(f"Expected JSON object from {url}")
     return payload
+
+
+def _github_headers() -> dict[str, str]:
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+    }
+    token = _github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_token() -> str:
+    for env_name in ("GITHUB_PERSONAL_ACCESS_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+        token = os.environ.get(env_name, "").strip()
+        if token:
+            return token
+    return _git_credential_token()
+
+
+def _git_credential_token() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "credential", "fill"],
+            input="protocol=https\nhost=github.com\n\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    for line in completed.stdout.splitlines():
+        if line.startswith("password="):
+            return line.partition("=")[2].strip()
+    return ""
 
 
 def fetch_defihacklabs_tree() -> list[dict[str, str]]:
@@ -57,7 +105,8 @@ def collect_direct_evidence(output_dir: Path, max_defihacklabs: int = 250) -> di
     """Persist direct evidence candidates from public replay-oriented sources."""
 
     ensure_dir(output_dir)
-    rows = _collect_defihacklabs_rows(max_fixtures=max_defihacklabs)
+    load_local_environment(REPO_ROOT)
+    rows, collection_status, collection_warning = _collect_defihacklabs_rows(max_fixtures=max_defihacklabs)
 
     latest_csv = output_dir / "direct_evidence_latest.csv"
     latest_json = output_dir / "direct_evidence_latest.json"
@@ -86,24 +135,67 @@ def collect_direct_evidence(output_dir: Path, max_defihacklabs: int = 250) -> di
         "direct_candidate_count": len(rows),
         "defihacklabs_candidate_count": len(rows),
         "direct_evidence_csv": str(latest_csv),
+        "collection_status": collection_status,
     }
+    if collection_warning:
+        summary["collection_warning"] = collection_warning
     write_json(latest_json, {"summary": summary, "rows": rows})
     return summary
 
 
-def _collect_defihacklabs_rows(*, max_fixtures: int) -> list[dict[str, str]]:
+def _collect_defihacklabs_rows(*, max_fixtures: int) -> tuple[list[dict[str, str]], str, str]:
     rows: list[dict[str, str]] = []
-    for item in fetch_defihacklabs_tree():
+    collection_status = "complete"
+    collection_warning = ""
+    try:
+        items = fetch_defihacklabs_tree()
+    except HTTPError as exc:
+        if _is_github_rate_limit_error(exc):
+            return rows, "rate_limited", _format_rate_limit_warning(exc, DEFIHACKLABS_TREE_URL)
+        raise
+
+    for item in items:
         path = str(item.get("path") or "")
         if not _is_defihacklabs_exploit_fixture(path):
             continue
-        fixture = fetch_defihacklabs_fixture(path)
+        try:
+            fixture = fetch_defihacklabs_fixture(path)
+        except HTTPError as exc:
+            if _is_github_rate_limit_error(exc):
+                collection_status = "rate_limited"
+                collection_warning = _format_rate_limit_warning(exc, path)
+                break
+            raise
         parsed = _parse_defihacklabs_fixture(fixture)
         if parsed:
             rows.append(parsed)
         if len(rows) >= max_fixtures:
             break
-    return rows
+    return rows, collection_status, collection_warning
+
+
+def _is_github_rate_limit_error(exc: HTTPError) -> bool:
+    headers = getattr(exc, "headers", None)
+    remaining = ""
+    if headers is not None:
+        remaining = str(headers.get("X-RateLimit-Remaining", "")).strip()
+    text = _http_error_text(exc).lower()
+    return exc.code == 429 or remaining == "0" or "rate limit" in text
+
+
+def _format_rate_limit_warning(exc: HTTPError, subject: str) -> str:
+    message = _http_error_text(exc).strip() or str(exc)
+    return f"GitHub rate limit hit while fetching {subject}: {message}"
+
+
+def _http_error_text(exc: HTTPError) -> str:
+    body = ""
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        body = ""
+    reason = str(exc.reason or "")
+    return " ".join(part for part in (reason, body) if part).strip()
 
 
 def _is_defihacklabs_exploit_fixture(path: str) -> bool:

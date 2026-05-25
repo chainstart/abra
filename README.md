@@ -173,6 +173,9 @@ fixtures, then materializes a four-stage evidence boundary:
 BlockSec, PeckShield, SlowMist incident pages, Rekt, Immunefi, Beosin, ChainSecurity, OpenZeppelin,
 or official security-alert social accounts; text-only mentions of security firms do not count.
 Direct tx sources are prioritized ahead of generic report pages when source-fetch budget is tight.
+For larger DeFiHackLabs refreshes, ABRA will use `GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`,
+or `GH_TOKEN` from `.env.local` / environment, and otherwise falls back to locally configured `git`
+GitHub credentials before resorting to unauthenticated API access.
 Social alerts and ordinary references are treated as provenance and search leads, not as blockers:
 if a source cannot be fetched directly, ABRA may use bounded on-chain-anchor discovery to find
 explorer/transaction references for the same candidate and then verify the fork block through

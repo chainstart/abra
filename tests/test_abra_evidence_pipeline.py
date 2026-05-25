@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import csv
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -2091,6 +2093,112 @@ contract CurveLlamaLendExploitTest is Test {
     assert by_id["defihacklabs-2026-03-curve-llamalend"]["chain"] == "ethereum"
     assert by_id["defihacklabs-2026-03-curve-llamalend"]["seed_transaction_hash"] == "0x" + "b" * 64
     assert by_id["defihacklabs-2026-03-curve-llamalend"]["fork_block"] == "22044321"
+
+
+def test_direct_evidence_collector_adds_github_auth_headers_when_token_is_available(tmp_path, monkeypatch):
+    collector = _load_pipeline_module("direct_evidence_collector")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-test-token")
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = json.dumps(payload).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    seen_auth_headers: list[str | None] = []
+
+    def fake_urlopen(request, timeout: float):
+        seen_auth_headers.append(request.get_header("Authorization"))
+        if request.full_url == collector.DEFIHACKLABS_TREE_URL:
+            return FakeResponse({"tree": [{"path": "src/test/2026-01/MTToken_exp.sol"}]})
+        if request.full_url == collector.DEFIHACKLABS_CONTENTS_URL.format(path="src/test/2026-01/MTToken_exp.sol"):
+            return FakeResponse(
+                {
+                    "path": "src/test/2026-01/MTToken_exp.sol",
+                    "html_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+                    "download_url": "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol",
+                    "encoding": "base64",
+                    "content": base64.b64encode(
+                        b'// Attack Tx (BSC): https://bscscan.com/tx/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+                    ).decode("ascii"),
+                }
+            )
+        raise AssertionError(request.full_url)
+
+    monkeypatch.setattr(collector, "urlopen", fake_urlopen)
+
+    summary = collector.collect_direct_evidence(output_dir=tmp_path, max_defihacklabs=1)
+
+    assert summary["direct_candidate_count"] == 1
+    assert seen_auth_headers == ["Bearer gh-test-token", "Bearer gh-test-token"]
+
+
+def test_direct_evidence_collector_keeps_partial_rows_when_github_rate_limit_hits(tmp_path, monkeypatch):
+    collector = _load_pipeline_module("direct_evidence_collector")
+
+    def fake_fetch_tree() -> list[dict[str, str]]:
+        return [
+            {"path": "src/test/2026-01/MTToken_exp.sol"},
+            {"path": "src/test/2026-03/Curve_LlamaLend_exp.sol"},
+        ]
+
+    def fake_fetch_contents(path: str) -> dict[str, str]:
+        if path == "src/test/2026-01/MTToken_exp.sol":
+            return {
+                "path": path,
+                "html_url": "https://github.com/SunWeb3Sec/DeFiHackLabs/blob/main/src/test/2026-01/MTToken_exp.sol",
+                "download_url": "https://raw.githubusercontent.com/SunWeb3Sec/DeFiHackLabs/main/src/test/2026-01/MTToken_exp.sol",
+                "content": """
+// Attack Tx (BSC) : https://bscscan.com/tx/0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+contract MTExploitTest is Test {
+    uint256 internal constant FORK_BLOCK = 74_937_079;
+    function setUp() public {
+        vm.createSelectFork("bsc", FORK_BLOCK);
+    }
+}
+                """,
+            }
+        raise HTTPError(
+            collector.DEFIHACKLABS_CONTENTS_URL.format(path=path),
+            403,
+            "Forbidden",
+            {"X-RateLimit-Remaining": "0"},
+            io.BytesIO(b'{"message":"API rate limit exceeded"}'),
+        )
+
+    monkeypatch.setattr(collector, "fetch_defihacklabs_tree", fake_fetch_tree)
+    monkeypatch.setattr(collector, "fetch_defihacklabs_fixture", fake_fetch_contents)
+
+    summary = collector.collect_direct_evidence(output_dir=tmp_path, max_defihacklabs=10)
+
+    assert summary["collection_status"] == "rate_limited"
+    assert summary["direct_candidate_count"] == 1
+    rows = _read_csv(tmp_path / "direct_evidence_latest.csv")
+    assert len(rows) == 1
+    assert rows[0]["incident_id"] == "defihacklabs-2026-01-mttoken"
+    assert "GitHub rate limit hit" in str(summary["collection_warning"])
+
+
+def test_direct_evidence_collector_cli_help_runs_as_script():
+    repo_root = Path(__file__).resolve().parents[1]
+    script = repo_root / "tools" / "pipeline" / "direct_evidence_collector.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "Collect direct evidence candidates" in completed.stdout
 
 
 def test_normalize_preserves_direct_evidence_seed_tx_and_fork_block(tmp_path):

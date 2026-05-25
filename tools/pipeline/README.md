@@ -46,6 +46,11 @@ python3 tools/pipeline/generate_event_cards.py \
   --top-n 12
 ```
 
+For larger DeFiHackLabs refreshes, provide `GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`,
+or `GH_TOKEN` in the process environment or `.env.local`. The direct evidence collector also
+falls back to existing local `git` GitHub credentials when available, and if GitHub rate limits
+still fire mid-run it preserves the partial candidate set instead of aborting the whole Phase-1 step.
+
 ## Output Paths
 
 - Raw incident snapshots: `data/raw/slowmist/`
