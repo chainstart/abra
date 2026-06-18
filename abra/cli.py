@@ -10,9 +10,12 @@ from typing import Any
 from abra import __version__
 from abra.agent import run_research_agent
 from abra.bundle import build_result_bundle, validate_result_bundle
+from abra.evidence_pipeline import produce_evidence_pipeline
 from abra.manifest import load_manifest
 from abra.memory import build_memory_index, query_memory_index
 from abra.replay_agent import assess_replay_fixture, validate_evidence_bundle
+from abra.replay_cohort_assessment import assess_replay_cohort
+from abra.replay_cohort import build_replay_cohort
 from abra.smoke import build_smoke_report
 from abra.tools import list_tools
 
@@ -95,8 +98,75 @@ def _build_parser() -> argparse.ArgumentParser:
     bundle_validate.add_argument("bundle_path", help="Path to an abra_result_bundle directory.")
     bundle_validate.add_argument("--json", action="store_true", help="Print JSON output.")
 
-    replay = subparsers.add_parser("replay", help="Assess bounded ABRA replay feasibility.")
+    replay = subparsers.add_parser("replay", help="Build replay cohorts and assess replay feasibility.")
     replay_sub = replay.add_subparsers(dest="replay_command", required=True)
+
+    replay_cohort = replay_sub.add_parser("cohort", help="Build a validated public incident replay cohort.")
+    replay_cohort.add_argument(
+        "--incidents-csv",
+        default="data/processed/incidents_anchored_latest.csv",
+        help="Anchored incident CSV produced by the ABRA phase-1 evidence pipeline.",
+    )
+    replay_cohort.add_argument(
+        "--selected-incidents-csv",
+        default=None,
+        help="Optional ABRA selected incident CSV used as a ranking boost.",
+    )
+    replay_cohort.add_argument(
+        "--replay-results-csv",
+        default="data/processed/replay_results.csv",
+        help="Optional replay result CSV used only to attach replay fixture metadata to already-qualified incidents.",
+    )
+    replay_cohort.add_argument(
+        "--event-cards-dir",
+        default="reports/events",
+        help="Directory containing ABRA incident cards used as local fixture metadata, never as standalone candidate sources.",
+    )
+    replay_cohort.add_argument("--out", required=True, help="Output cohort directory.")
+    replay_cohort.add_argument("--min-cases", type=int, default=10, help="Minimum eligible cases required.")
+    replay_cohort.add_argument("--max-cases", type=int, default=20, help="Maximum cases to retain.")
+    replay_cohort.add_argument("--evm-only", action="store_true", default=True, help="Restrict the cohort to EVM chains.")
+    replay_cohort.add_argument("--include-non-evm", dest="evm_only", action="store_false", help="Allow non-EVM cases.")
+    replay_cohort.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Refresh ABRA SlowMist/DefiLlama snapshots before building the cohort.",
+    )
+    replay_cohort.add_argument("--refresh-start-page", type=int, default=1, help="SlowMist refresh start page.")
+    replay_cohort.add_argument("--refresh-end-page", type=int, default=8, help="SlowMist refresh end page.")
+    replay_cohort.add_argument("--refresh-top-protocols", type=int, default=400, help="DefiLlama protocol refresh cap.")
+    replay_cohort.add_argument(
+        "--rpc-provider",
+        default="alchemy",
+        help="RPC capability provider used for chain support filtering. Defaults to Alchemy.",
+    )
+    replay_cohort.add_argument(
+        "--rpc-supported-chain",
+        action="append",
+        dest="rpc_supported_chains",
+        help="Explicitly allow a chain for replay evidence enrichment. Repeatable.",
+    )
+    replay_cohort.add_argument(
+        "--no-security-anchor-backfill",
+        action="store_true",
+        help="Disable incomplete provenance-only backfill cases and keep only incidents that already have tx hash and replay block.",
+    )
+    replay_cohort.add_argument(
+        "--no-evidence-candidates",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    replay_cohort.add_argument(
+        "--allow-missing-seed-transaction-hash",
+        action="store_true",
+        help="Keep cases without seed transaction hashes for diagnostic cohorts.",
+    )
+    replay_cohort.add_argument(
+        "--allow-missing-replay-block",
+        action="store_true",
+        help="Keep cases without fork/replay blocks for diagnostic cohorts.",
+    )
+    replay_cohort.add_argument("--json", action="store_true", help="Print JSON output.")
 
     replay_assess = replay_sub.add_parser("assess", help="Build a replay feasibility evidence bundle.")
     replay_assess.add_argument("--case-fixture", required=True, help="Local replay case fixture JSON.")
@@ -112,8 +182,48 @@ def _build_parser() -> argparse.ArgumentParser:
     replay_assess.add_argument("--out", required=True, help="Output replay evidence bundle directory.")
     replay_assess.add_argument("--json", action="store_true", help="Print JSON output.")
 
-    evidence = subparsers.add_parser("evidence", help="Validate ABRA evidence bundles.")
+    replay_assess_cohort = replay_sub.add_parser(
+        "assess-cohort",
+        help="Build replay evidence bundles for every case in a replay cohort.",
+    )
+    replay_assess_cohort.add_argument("--cohort", required=True, help="Replay cohort directory or manifest.json.")
+    replay_assess_cohort.add_argument("--out", required=True, help="Output cohort evidence directory.")
+    replay_assess_cohort.add_argument("--min-level", default="L1", help="Minimum evidence level for per-case validation.")
+    replay_assess_cohort.add_argument("--json", action="store_true", help="Print JSON output.")
+
+    evidence = subparsers.add_parser("evidence", help="Produce and validate ABRA evidence artifacts.")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
+
+    evidence_produce = evidence_sub.add_parser(
+        "produce",
+        help="Materialize staged incident security enrichment and Alchemy backfill artifacts.",
+    )
+    evidence_produce.add_argument(
+        "--incidents-csv",
+        default="data/processed/incidents_normalized_latest.csv",
+        help="Normalized incident CSV produced by the ABRA phase-1 pipeline.",
+    )
+    evidence_produce.add_argument(
+        "--out-dir",
+        default="data/processed",
+        help=(
+            "Directory for security_evidence_enriched_latest.*, "
+            "alchemy_onchain_backfill_latest.*, incidents_anchored_latest.*, "
+            "and incidents_candidate_backlog_latest.*."
+        ),
+    )
+    evidence_produce.add_argument(
+        "--rpc-provider",
+        default="alchemy",
+        help="RPC capability provider used for chain support filtering. Defaults to Alchemy.",
+    )
+    evidence_produce.add_argument(
+        "--rpc-supported-chain",
+        action="append",
+        dest="rpc_supported_chains",
+        help="Explicitly allow a chain for deterministic tests or offline runs. Repeatable.",
+    )
+    evidence_produce.add_argument("--json", action="store_true", help="Print JSON output.")
 
     evidence_validate = evidence_sub.add_parser("validate", help="Validate an ABRA evidence bundle directory.")
     evidence_validate.add_argument("bundle_path", help="Path to a bundle containing evidence_bundle.json.")
@@ -201,6 +311,29 @@ def _handle_bundle(args: argparse.Namespace) -> int:
 
 
 def _handle_replay(args: argparse.Namespace) -> int:
+    if args.replay_command == "cohort":
+        payload = build_replay_cohort(
+            incidents_csv=args.incidents_csv,
+            selected_incidents_csv=args.selected_incidents_csv,
+            replay_results_csv=args.replay_results_csv,
+            event_cards_dir=args.event_cards_dir,
+            out=args.out,
+            min_cases=args.min_cases,
+            max_cases=args.max_cases,
+            evm_only=args.evm_only,
+            refresh=args.refresh,
+            refresh_start_page=args.refresh_start_page,
+            refresh_end_page=args.refresh_end_page,
+            refresh_top_protocols=args.refresh_top_protocols,
+            require_seed_transaction_hash=not args.allow_missing_seed_transaction_hash,
+            require_replay_block=not args.allow_missing_replay_block,
+            include_evidence_candidates=not (args.no_security_anchor_backfill or args.no_evidence_candidates),
+            rpc_provider=args.rpc_provider,
+            rpc_supported_chains=args.rpc_supported_chains,
+        )
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
     if args.replay_command == "assess":
         payload = assess_replay_fixture(
             args.case_fixture,
@@ -211,10 +344,25 @@ def _handle_replay(args: argparse.Namespace) -> int:
         _emit(payload, args.json)
         return 0 if payload["status"] == "passed" else 1
 
+    if args.replay_command == "assess-cohort":
+        payload = assess_replay_cohort(cohort=args.cohort, out=args.out, min_level=args.min_level)
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
     raise ValueError(f"Unsupported replay command: {args.replay_command}")
 
 
 def _handle_evidence(args: argparse.Namespace) -> int:
+    if args.evidence_command == "produce":
+        payload = produce_evidence_pipeline(
+            incidents_csv=args.incidents_csv,
+            out_dir=args.out_dir,
+            rpc_provider=args.rpc_provider,
+            rpc_supported_chains=args.rpc_supported_chains,
+        )
+        _emit(payload, args.json)
+        return 0 if payload["status"] == "passed" else 1
+
     if args.evidence_command == "validate":
         payload = validate_evidence_bundle(args.bundle_path, args.min_level)
         _emit(payload, args.json)

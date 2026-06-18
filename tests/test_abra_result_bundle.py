@@ -8,6 +8,7 @@ from pathlib import Path
 
 from abra.bundle import build_result_bundle, validate_result_bundle
 from abra.replay_agent import assess_replay_fixture
+from tools.ara_bundle_validate import discover_default_ara_root
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "abra_bundle_source"
@@ -150,6 +151,13 @@ def test_public_ara_accepts_replay_bundle_without_allowing_l1_replay_claims(tmp_
     blocked = payload["drafting_context"]["blocked_claims"]
     assert all(claim["evidence_level"] == "L4" for claim in allowed)
     assert all(claim["evidence_level"] == "L1" for claim in blocked)
+
+
+def test_ara_bundle_validate_discovers_sibling_ara_checkout():
+    root = discover_default_ara_root()
+
+    assert root.name == "auto-research-agent"
+    assert (root / "ara" / "__init__.py").exists()
 
 
 def _fingerprints(root: Path) -> dict[str, str]:

@@ -113,17 +113,23 @@ python3 tools/pipeline/run_phase1.py --start-page 1 --end-page 3 --top-protocols
 # Output:
 # - data/raw/slowmist/
 # - data/raw/defillama/
+# - data/raw/direct_evidence/
 # - data/processed/
+#   - incidents_normalized_latest.csv
+#   - security_evidence_enriched_latest.csv/json
+#   - alchemy_onchain_backfill_latest.csv/json
+#   - incidents_anchored_latest.csv/json
+#   - incidents_candidate_backlog_latest.csv/json
 # - reports/17_phase1_data_quality.md
 
-# Generate top incident replay cards
+# Generate top replay cards from the anchored main set
 python3 tools/pipeline/generate_event_cards.py --top-n 50
 ```
 
 ### Run Phase-2 Shortlisting And Replay Skeleton
 
 ```bash
-# Select the first replay batch from normalized incidents
+# Select the first replay batch from the anchored main set
 python3 tools/pipeline/select_phase2_incidents.py
 
 # Generate replay cards for the selected batch
@@ -141,16 +147,17 @@ forge test --match-path test/replay/EulerFinanceReplay.t.sol
 
 Use the replay runner instead of raw `forge test` when producing paper evidence. It separates
 verified replay from missing RPC, archive-state failures, and missing replay implementations.
+ABRA uses Alchemy as the default RPC capability boundary: configure `ALCHEMY_API_KEY` once and
+ABRA derives chain-specific read-only RPC URLs for supported chains. Keep secrets in `.env.local`
+or the process environment; do not commit RPC keys.
 
 ```bash
-# Public RPC endpoints can test connectivity, but may not serve old archive state.
-ETH_RPC_URL=https://ethereum.publicnode.com \
-POLYGON_RPC_URL=https://polygon-bor-rpc.publicnode.com \
+# Preferred: one Alchemy key is enough for ABRA replay cohorting and Foundry fork replay.
+ALCHEMY_API_KEY=... \
 python3 tools/replay_runner.py --timeout 300 --verbosity=-vv
 
-# Archive-capable endpoints are required for verified historical replay.
+# Explicit per-chain RPC variables remain optional overrides for special archive endpoints.
 ETH_RPC_URL=... python3 tools/replay_runner.py --only lendf-me euler-finance
-POLYGON_RPC_URL=... python3 tools/replay_runner.py --only bonqdao-allianceblock
 ```
 
 Outputs:
@@ -159,6 +166,58 @@ Outputs:
 - `data/processed/replay_results.json`
 - `data/processed/replay_blocker_matrix.csv`
 - `reports/27_replay_verification_results.md`
+
+### Build an Alchemy-Bounded Replay Cohort
+
+Use `abra replay cohort` before replay assessment when ARA asks ABRA to produce blockchain
+evidence. The cohort builder first consumes public incident candidates from SlowMist Hacked,
+DefiLlama hacks/losses, and direct tx / replay-oriented sources such as DeFiHackLabs-derived
+fixtures, then materializes a four-stage evidence boundary:
+`candidate_discovery`, `security_evidence_enrichment`, `alchemy_onchain_backfill`, and
+`replay_cohort_selection`. Security enrichment records URL-host anchored reports such as CertiK,
+BlockSec, PeckShield, SlowMist incident pages, Rekt, Immunefi, Beosin, ChainSecurity, OpenZeppelin,
+or official security-alert social accounts; text-only mentions of security firms do not count.
+Direct tx sources are prioritized ahead of generic report pages when source-fetch budget is tight.
+For larger DeFiHackLabs refreshes, ABRA will use `GITHUB_PERSONAL_ACCESS_TOKEN`, `GITHUB_TOKEN`,
+or `GH_TOKEN` from `.env.local` / environment, and otherwise falls back to locally configured `git`
+GitHub credentials before resorting to unauthenticated API access.
+Social alerts and ordinary references are treated as provenance and search leads, not as blockers:
+if a source cannot be fetched directly, ABRA may use bounded on-chain-anchor discovery to find
+explorer/transaction references for the same candidate and then verify the fork block through
+Alchemy read-only receipts. The pipeline never invents new candidates from RPC/search results.
+Local event cards and `replay_results.csv` only attach fixture metadata to already-qualified
+incidents; they never create new candidates on their own. Missing transaction hashes or fork blocks
+remain visible as diagnostic evidence boundaries instead of being silently treated as replay-ready
+cases.
+
+```bash
+ALCHEMY_API_KEY=... \
+python3 -m abra replay cohort \
+  --refresh \
+  --out runs/abra_evidence/cohort \
+  --min-cases 10 \
+  --max-cases 20 \
+  --evm-only \
+  --json
+```
+
+If neither `ALCHEMY_API_KEY` nor an Alchemy RPC URL is configured, the command fails with
+`alchemy_rpc_not_configured` rather than falling back to unrelated public RPC providers.
+
+Stage outputs:
+
+- `data/processed/security_evidence_enriched_latest.csv`
+- `data/processed/security_evidence_enriched_latest.json`
+- `data/processed/alchemy_onchain_backfill_latest.csv`
+- `data/processed/alchemy_onchain_backfill_latest.json`
+- `data/processed/incidents_anchored_latest.csv`
+- `data/processed/incidents_anchored_latest.json`
+- `data/processed/incidents_candidate_backlog_latest.csv`
+- `data/processed/incidents_candidate_backlog_latest.json`
+- `runs/abra_evidence/cohort/manifest.json`
+- `runs/abra_evidence/cohort/exclusion_log.json`
+- `runs/abra_evidence/cohort/stage_ledger.json`
+- `runs/abra_evidence/cohort/cases/*.json`
 
 ## Audit Framework
 
@@ -207,3 +266,10 @@ Based on **OWASP Smart Contract Top 10 (2026)** with protocol-specific business 
 ```bash
 pip install -r tools/requirements.txt
 ```
+
+If ABRA entrypoints are launched from a Python interpreter that does not already
+have these packages, the repo will bootstrap a local `.venv/` on first run and
+install `tools/requirements.txt` there before continuing. This keeps
+`python3 -m abra ...` and `python3 tools/pipeline/run_phase1.py ...` runnable
+from ARA external-command workspaces without relying on the caller's ambient
+site-packages.

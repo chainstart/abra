@@ -207,8 +207,31 @@ REPLAY_CASES: tuple[ReplayCase, ...] = (
     ),
 )
 
+ALCHEMY_NETWORK_SLUGS = {
+    "ETH_RPC_URL": "eth-mainnet",
+    "MAINNET_RPC_URL": "eth-mainnet",
+    "POLYGON_RPC_URL": "polygon-mainnet",
+    "BSC_RPC_URL": "bnb-mainnet",
+    "BNB_RPC_URL": "bnb-mainnet",
+    "ARBITRUM_RPC_URL": "arb-mainnet",
+    "OPTIMISM_RPC_URL": "opt-mainnet",
+    "BASE_RPC_URL": "base-mainnet",
+    "AVALANCHE_RPC_URL": "avax-mainnet",
+    "BLAST_RPC_URL": "blast-mainnet",
+    "SONIC_RPC_URL": "sonic-mainnet",
+    "MANTLE_RPC_URL": "mantle-mainnet",
+    "LINEA_RPC_URL": "linea-mainnet",
+    "CELO_RPC_URL": "celo-mainnet",
+    "POLYGON_ZKEVM_RPC_URL": "polygonzkevm-mainnet",
+    "ZKSYNC_RPC_URL": "zksync-mainnet",
+    "BERACHAIN_RPC_URL": "berachain-mainnet",
+    "SOLANA_RPC_URL": "solana-mainnet",
+    "SUI_RPC_URL": "sui-mainnet",
+    "APTOS_RPC_URL": "aptos-mainnet",
+}
 
-def _run(cmd: list[str], timeout: int, log_file: Path) -> tuple[int, float]:
+
+def _run(cmd: list[str], timeout: int, log_file: Path, env: dict[str, str] | None = None) -> tuple[int, float]:
     started = datetime.now(timezone.utc)
     proc = subprocess.run(
         cmd,
@@ -218,6 +241,7 @@ def _run(cmd: list[str], timeout: int, log_file: Path) -> tuple[int, float]:
         stderr=subprocess.STDOUT,
         timeout=timeout,
         check=False,
+        env=env,
     )
     duration = (datetime.now(timezone.utc) - started).total_seconds()
     log_file.write_text(proc.stdout, encoding="utf-8")
@@ -240,6 +264,19 @@ def classify_failure(log_text: str) -> str:
     """Classify a replay failure log without running a replay command."""
 
     return _classify_failure(log_text)
+
+
+def rpc_url_for_case(case: ReplayCase) -> str:
+    """Resolve explicit RPC env first, then derive from the unified Alchemy key."""
+
+    explicit = os.environ.get(case.rpc_env)
+    if explicit:
+        return explicit
+    api_key = os.environ.get("ALCHEMY_API_KEY")
+    network_slug = ALCHEMY_NETWORK_SLUGS.get(case.rpc_env)
+    if api_key and network_slug:
+        return f"https://{network_slug}.g.alchemy.com/v2/{api_key}"
+    return ""
 
 
 def _classify_failure(log_text: str) -> str:
@@ -306,7 +343,8 @@ def run_case(case: ReplayCase, logs_dir: Path, timeout: int, verbosity: str) -> 
                 verified=False,
             )
 
-    if not os.environ.get(case.rpc_env):
+    rpc_url = rpc_url_for_case(case)
+    if not rpc_url:
         return ReplayResult(
             incident=case.incident,
             slug=case.slug,
@@ -330,7 +368,9 @@ def run_case(case: ReplayCase, logs_dir: Path, timeout: int, verbosity: str) -> 
     replay_log = logs_dir / f"{case.slug}.replay.log"
     replay_cmd = _forge_cmd(case.test_path, case.replay_test, verbosity)
     try:
-        rc, duration = _run(replay_cmd, timeout, replay_log)
+        replay_env = dict(os.environ)
+        replay_env[case.rpc_env] = rpc_url
+        rc, duration = _run(replay_cmd, timeout, replay_log, env=replay_env)
     except subprocess.TimeoutExpired as exc:
         replay_log.write_text(exc.stdout or "", encoding="utf-8")
         return ReplayResult(

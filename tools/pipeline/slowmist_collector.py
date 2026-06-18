@@ -5,18 +5,35 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import requests
-from bs4 import BeautifulSoup
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
+from abra.runtime_bootstrap import ensure_repo_runtime
 from common import ensure_dir, now_utc_iso, parse_loss_usd, sha1_id, write_csv, write_json
 
 BASE_URL = "https://hacked.slowmist.io/"
 USER_AGENT = "abra-research-bot/1.0"
+_REQUESTS = None
+_BEAUTIFULSOUP = None
+
+
+def _slowmist_runtime() -> tuple[Any, Any]:
+    global _REQUESTS, _BEAUTIFULSOUP
+    if _REQUESTS is None or _BEAUTIFULSOUP is None:
+        ensure_repo_runtime(REPO_ROOT, required_modules=("requests", "bs4"))
+        import requests as requests_module
+        from bs4 import BeautifulSoup as beautifulsoup_class
+
+        _REQUESTS = requests_module
+        _BEAUTIFULSOUP = beautifulsoup_class
+    return _REQUESTS, _BEAUTIFULSOUP
 
 
 def fetch_html(session: requests.Session, page: int, category: str) -> str:
@@ -30,7 +47,8 @@ def fetch_html(session: requests.Session, page: int, category: str) -> str:
 
 def parse_total_pages(html: str) -> int | None:
     """Extract total page count from pagination text."""
-    soup = BeautifulSoup(html, "html.parser")
+    _requests_module, beautifulsoup_class = _slowmist_runtime()
+    soup = beautifulsoup_class(html, "html.parser")
     node = soup.find(string=re.compile(r"Page\s+\d+\s+of\s+\d+", re.IGNORECASE))
     if not node:
         return None
@@ -40,7 +58,8 @@ def parse_total_pages(html: str) -> int | None:
 
 def parse_events(html: str, page: int, category: str) -> list[dict[str, Any]]:
     """Parse events from one page."""
-    soup = BeautifulSoup(html, "html.parser")
+    _requests_module, beautifulsoup_class = _slowmist_runtime()
+    soup = beautifulsoup_class(html, "html.parser")
     rows: list[dict[str, Any]] = []
 
     event_nodes = soup.select("div.case-content > ul > li")
@@ -108,7 +127,8 @@ def collect_events(
     ensure_dir(output_dir)
     ensure_dir(output_dir / "html")
 
-    session = requests.Session()
+    requests_module, _beautifulsoup_class = _slowmist_runtime()
+    session = requests_module.Session()
     session.headers.update({"User-Agent": USER_AGENT})
 
     page = start_page

@@ -1,0 +1,2127 @@
+"""Materialize ABRA's staged event collection and evidence-production pipeline."""
+
+from __future__ import annotations
+
+import csv
+import base64
+import binascii
+import html
+import json
+import os
+import re
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable
+from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
+
+from abra.chain_support import (
+    chain_id,
+    chain_rpc_supported,
+    infer_chain,
+    load_local_environment,
+    normalize_chain,
+    rpc_capability_state,
+    rpc_env_for_chain,
+    rpc_url_for_chain,
+)
+from abra.evidence_sources import (
+    candidate_discovery_sources,
+    security_report_sources,
+    text_only_security_mentions_ignored,
+)
+from abra.manifest import repo_root
+
+
+EVIDENCE_PIPELINE_SCHEMA_VERSION = "abra.evidence_pipeline.v1"
+SECURITY_EVIDENCE_SCHEMA_VERSION = "abra.security_evidence_enriched.v1"
+ALCHEMY_BACKFILL_SCHEMA_VERSION = "abra.alchemy_onchain_backfill.v1"
+INCIDENT_PARTITION_SCHEMA_VERSION = "abra.incident_partition.v1"
+
+SECURITY_EVIDENCE_CSV = "security_evidence_enriched_latest.csv"
+SECURITY_EVIDENCE_JSON = "security_evidence_enriched_latest.json"
+ALCHEMY_BACKFILL_CSV = "alchemy_onchain_backfill_latest.csv"
+ALCHEMY_BACKFILL_JSON = "alchemy_onchain_backfill_latest.json"
+ANCHORED_INCIDENTS_CSV = "incidents_anchored_latest.csv"
+ANCHORED_INCIDENTS_JSON = "incidents_anchored_latest.json"
+CANDIDATE_BACKLOG_CSV = "incidents_candidate_backlog_latest.csv"
+CANDIDATE_BACKLOG_JSON = "incidents_candidate_backlog_latest.json"
+
+SECURITY_EVIDENCE_FIELDS = [
+    "incident_id",
+    "slug",
+    "target",
+    "event_date",
+    "chain",
+    "chain_id",
+    "attack_family",
+    "loss_usd",
+    "reference_url",
+    "source_url",
+    "candidate_discovery_sources",
+    "security_report_sources",
+    "security_source_name",
+    "security_source_url",
+    "security_anchor",
+    "confidence",
+    "evidence_gap",
+    "seed_transaction_hash",
+    "fork_block",
+    "description",
+]
+
+ALCHEMY_BACKFILL_FIELDS = [
+    "incident_id",
+    "slug",
+    "target",
+    "event_date",
+    "chain",
+    "chain_id",
+    "rpc_provider",
+    "rpc_env",
+    "rpc_supported",
+    "security_anchor",
+    "backfill_status",
+    "missing_onchain_fields",
+    "seed_transaction_hash",
+    "fork_block",
+    "source_fetch_status",
+    "source_evidence_url",
+    "source_extracted_seed_transaction_hash",
+    "source_extracted_block",
+    "anchor_discovery_status",
+    "anchor_discovery_url",
+    "anchor_discovery_seed_transaction_hash",
+    "anchor_discovery_block",
+    "anchor_discovery_attempt_count",
+    "anchor_discovery_timeout_count",
+    "anchor_discovery_result_statuses",
+    "rpc_backfill_status",
+    "reference_url",
+    "security_report_sources",
+]
+
+INCIDENT_PARTITION_EXTRA_FIELDS = [
+    "slug",
+    "chain_id",
+    "candidate_discovery_sources",
+    "security_report_sources",
+    "security_source_name",
+    "security_source_url",
+    "security_anchor",
+    "confidence",
+    "evidence_gap",
+    "rpc_provider",
+    "rpc_env",
+    "rpc_supported",
+    "backfill_status",
+    "missing_onchain_fields",
+    "source_fetch_status",
+    "source_evidence_url",
+    "source_extracted_seed_transaction_hash",
+    "source_extracted_block",
+    "anchor_discovery_status",
+    "anchor_discovery_url",
+    "anchor_discovery_seed_transaction_hash",
+    "anchor_discovery_block",
+    "anchor_discovery_attempt_count",
+    "anchor_discovery_timeout_count",
+    "anchor_discovery_result_statuses",
+    "rpc_backfill_status",
+]
+
+SourceFetcher = Callable[..., dict[str, str]]
+RpcCaller = Callable[[str, str, list[str]], dict[str, Any]]
+AnchorSearcher = Callable[[dict[str, str]], list[dict[str, str]]]
+
+_TWITTERAPI_IO_REQUEST_COUNT = 0
+
+
+def produce_evidence_pipeline(
+    *,
+    incidents_csv: str | Path = "data/processed/incidents_normalized_latest.csv",
+    out_dir: str | Path = "data/processed",
+    rpc_provider: str = "alchemy",
+    rpc_supported_chains: list[str] | None = None,
+    source_fetcher: SourceFetcher | None = None,
+    anchor_searcher: AnchorSearcher | None = None,
+    rpc_caller: RpcCaller | None = None,
+) -> dict[str, Any]:
+    """Write explicit candidate enrichment and Alchemy backfill stage products."""
+
+    _reset_twitterapi_io_request_budget()
+    root = repo_root()
+    load_local_environment(root)
+    incidents_path = _resolve_repo_path(root, incidents_csv)
+    out_path = _resolve_repo_path(root, out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    incident_rows = _read_csv(incidents_path)
+    rpc_state = rpc_capability_state(provider=rpc_provider, explicit_chains=rpc_supported_chains)
+    rpc_chains = rpc_state["supported_chains"]
+    generated_at = _utc_now()
+
+    enriched_rows = [_enrich_security_evidence(row) for row in incident_rows]
+    reference_fetch_budget = _reference_fetch_budget()
+    anchor_discovery_budget = _onchain_anchor_discovery_budget()
+    backfill_candidate_rows = [
+        row
+        for row in enriched_rows
+        if row["reference_url"] or row["seed_transaction_hash"] or extract_seed_transaction_hash(row)
+    ]
+    reference_fetch_ids = _prioritized_reference_fetch_ids(backfill_candidate_rows, rpc_chains, reference_fetch_budget)
+    anchor_discovery_ids = _prioritized_anchor_discovery_ids(
+        backfill_candidate_rows,
+        rpc_chains,
+        anchor_discovery_budget,
+    )
+    backfill_rows = [
+        _build_backfill_row(
+            row,
+            rpc_provider=rpc_state["provider"],
+            rpc_supported_chains=rpc_chains,
+            incident_context=row,
+            source_fetcher=source_fetcher or fetch_security_source_text,
+            anchor_searcher=anchor_searcher or search_onchain_anchor_sources,
+            rpc_caller=rpc_caller or json_rpc_call,
+            allow_reference_fetch=row["incident_id"] in reference_fetch_ids,
+            allow_anchor_discovery=_onchain_anchor_discovery_enabled()
+            and row["incident_id"] in anchor_discovery_ids,
+        )
+        for row in backfill_candidate_rows
+    ]
+
+    security_summary = _security_summary(enriched_rows, incident_rows)
+    _write_csv(out_path / SECURITY_EVIDENCE_CSV, enriched_rows, SECURITY_EVIDENCE_FIELDS)
+    _write_json(
+        out_path / SECURITY_EVIDENCE_JSON,
+        {
+            "schema_version": SECURITY_EVIDENCE_SCHEMA_VERSION,
+            "stage": "security_evidence_enrichment",
+            "generated_at": generated_at,
+            "source_incidents_csv": str(incidents_path),
+            "summary": security_summary,
+            "rows": enriched_rows,
+        },
+    )
+    backfill_summary = _backfill_summary(enriched_rows, backfill_rows)
+    _write_csv(out_path / ALCHEMY_BACKFILL_CSV, backfill_rows, ALCHEMY_BACKFILL_FIELDS)
+    _write_json(
+        out_path / ALCHEMY_BACKFILL_JSON,
+        {
+            "schema_version": ALCHEMY_BACKFILL_SCHEMA_VERSION,
+            "stage": "alchemy_onchain_backfill",
+            "generated_at": generated_at,
+            "source_security_evidence_csv": SECURITY_EVIDENCE_CSV,
+            "rpc_capability": {
+                "provider": rpc_state["provider"],
+                "configured": rpc_state["configured"],
+                "configuration_sources": rpc_state["configuration_sources"],
+                "supported_chains": sorted(rpc_chains),
+            },
+            "summary": backfill_summary,
+            "rows": backfill_rows,
+        },
+    )
+    incident_partition = _partition_incident_rows(incident_rows, enriched_rows, backfill_rows)
+    _write_csv(
+        out_path / ANCHORED_INCIDENTS_CSV,
+        incident_partition["anchored_rows"],
+        incident_partition["fieldnames"],
+    )
+    _write_json(
+        out_path / ANCHORED_INCIDENTS_JSON,
+        {
+            "schema_version": INCIDENT_PARTITION_SCHEMA_VERSION,
+            "stage": "anchored_incident_partition",
+            "partition": "anchored_main_set",
+            "generated_at": generated_at,
+            "source_incidents_csv": str(incidents_path),
+            "source_security_evidence_csv": SECURITY_EVIDENCE_CSV,
+            "source_alchemy_backfill_csv": ALCHEMY_BACKFILL_CSV,
+            "summary": incident_partition["summary"],
+            "rows": incident_partition["anchored_rows"],
+        },
+    )
+    _write_csv(
+        out_path / CANDIDATE_BACKLOG_CSV,
+        incident_partition["backlog_rows"],
+        incident_partition["fieldnames"],
+    )
+    _write_json(
+        out_path / CANDIDATE_BACKLOG_JSON,
+        {
+            "schema_version": INCIDENT_PARTITION_SCHEMA_VERSION,
+            "stage": "anchored_incident_partition",
+            "partition": "candidate_backlog",
+            "generated_at": generated_at,
+            "source_incidents_csv": str(incidents_path),
+            "source_security_evidence_csv": SECURITY_EVIDENCE_CSV,
+            "source_alchemy_backfill_csv": ALCHEMY_BACKFILL_CSV,
+            "summary": incident_partition["summary"],
+            "rows": incident_partition["backlog_rows"],
+        },
+    )
+
+    errors: list[str] = []
+    if rpc_state["missing_configuration_error"]:
+        errors.append(rpc_state["missing_configuration_error"])
+    errors.extend(_evidence_quality_errors(backfill_summary))
+
+    return {
+        "schema_version": EVIDENCE_PIPELINE_SCHEMA_VERSION,
+        "status": "passed" if not errors else "failed",
+        "source_incidents_csv": str(incidents_path),
+        "out_dir": str(out_path),
+        "summary": {
+            **security_summary,
+            "alchemy_backfill_candidate_count": len(backfill_rows),
+            **backfill_summary,
+            "security_anchored_count": security_summary["security_anchored_count"],
+            **incident_partition["summary"],
+        },
+        "errors": errors,
+        "artifacts": {
+            "security_evidence_csv": SECURITY_EVIDENCE_CSV,
+            "security_evidence_json": SECURITY_EVIDENCE_JSON,
+            "alchemy_backfill_csv": ALCHEMY_BACKFILL_CSV,
+            "alchemy_backfill_json": ALCHEMY_BACKFILL_JSON,
+            "anchored_incidents_csv": ANCHORED_INCIDENTS_CSV,
+            "anchored_incidents_json": ANCHORED_INCIDENTS_JSON,
+            "candidate_backlog_csv": CANDIDATE_BACKLOG_CSV,
+            "candidate_backlog_json": CANDIDATE_BACKLOG_JSON,
+        },
+    }
+
+
+def _enrich_security_evidence(row: dict[str, str]) -> dict[str, str]:
+    candidate_sources = candidate_discovery_sources(row)
+    security_sources = security_report_sources(row)
+    security_anchor = bool(security_sources)
+    chain = infer_chain(row)
+    seed_hash = extract_seed_transaction_hash(row)
+    fork_block = parse_int(row.get("fork_block") or row.get("replay_block"))
+    missing: list[str] = []
+    if not candidate_sources:
+        missing.append("missing_candidate_source")
+    if not security_anchor:
+        missing.append("missing_security_anchor")
+    if not seed_hash:
+        missing.append("missing_seed_transaction_hash")
+    if fork_block is None:
+        missing.append("missing_replay_block")
+    primary_source = security_sources[0] if security_sources else {}
+    return {
+        "incident_id": row.get("incident_id") or _sha1([row.get("target", ""), row.get("event_date", "")]),
+        "slug": slugify(row.get("slug") or row.get("target") or row.get("incident") or "incident"),
+        "target": row.get("target") or row.get("incident") or "",
+        "event_date": row.get("event_date") or "",
+        "chain": chain,
+        "chain_id": "" if chain_id(chain) is None else str(chain_id(chain)),
+        "attack_family": row.get("attack_family") or "other",
+        "loss_usd": row.get("loss_usd") or "",
+        "reference_url": row.get("reference_url") or "",
+        "source_url": row.get("source_url") or "",
+        "candidate_discovery_sources": _json_cell(candidate_sources),
+        "security_report_sources": _json_cell(security_sources),
+        "security_source_name": str(primary_source.get("source") or ""),
+        "security_source_url": str(primary_source.get("url") or ""),
+        "security_anchor": str(security_anchor).lower(),
+        "confidence": _confidence(security_anchor=security_anchor, candidate_sources=candidate_sources),
+        "evidence_gap": "|".join(missing),
+        "seed_transaction_hash": seed_hash or "",
+        "fork_block": "" if fork_block is None else str(fork_block),
+        "description": row.get("description") or "",
+    }
+
+
+def _build_backfill_row(
+    row: dict[str, str],
+    *,
+    rpc_provider: str,
+    rpc_supported_chains: set[str],
+    incident_context: dict[str, str],
+    source_fetcher: SourceFetcher,
+    anchor_searcher: AnchorSearcher,
+    rpc_caller: RpcCaller,
+    allow_reference_fetch: bool,
+    allow_anchor_discovery: bool,
+) -> dict[str, str]:
+    chain = normalize_chain(row.get("chain") or "")
+    seed_hash = row.get("seed_transaction_hash") or extract_seed_transaction_hash(row) or ""
+    fork_block = row.get("fork_block") or ""
+    evidence_sources = _backfill_evidence_sources(row)
+    source_evidence_url = ""
+    source_fetch_status = "not_required" if seed_hash and fork_block else "not_attempted"
+    source_extracted_hash = ""
+    source_extracted_block = ""
+    anchor_discovery_status = "not_required" if seed_hash and fork_block else "not_attempted"
+    anchor_discovery_url = ""
+    anchor_discovery_hash = ""
+    anchor_discovery_block = ""
+    anchor_discovery_attempt_count = 0
+    anchor_discovery_timeout_count = 0
+    anchor_discovery_result_statuses = ""
+    supported = chain_rpc_supported(chain, rpc_supported_chains)
+    if (not seed_hash or not fork_block) and evidence_sources and not supported:
+        source_fetch_status = "source_fetch_skipped:rpc_unsupported"
+    elif (not seed_hash or not fork_block) and evidence_sources:
+        source_evidence = _extract_onchain_anchor_from_security_sources(
+            evidence_sources,
+            incident_context=incident_context,
+            source_fetcher=source_fetcher,
+            allow_reference_fetch=allow_reference_fetch,
+        )
+        source_fetch_status = source_evidence["source_fetch_status"]
+        source_evidence_url = source_evidence["source_evidence_url"]
+        source_extracted_hash = source_evidence["source_extracted_seed_transaction_hash"]
+        source_extracted_block = source_evidence["source_extracted_block"]
+        seed_hash = seed_hash or source_extracted_hash
+        fork_block = fork_block or source_extracted_block
+
+    rpc_backfill_status = "not_required" if fork_block else "not_attempted"
+    if seed_hash and not fork_block and supported:
+        rpc_result = _fetch_fork_block_from_rpc(chain, seed_hash, rpc_caller)
+        rpc_backfill_status = rpc_result["rpc_backfill_status"]
+        fork_block = rpc_result["fork_block"] or fork_block
+
+    if seed_hash and fork_block and anchor_discovery_status == "not_attempted":
+        anchor_discovery_status = "not_required"
+
+    if (not seed_hash) or (seed_hash and not fork_block):
+        if allow_anchor_discovery:
+            discovered = _discover_onchain_anchor(
+                row,
+                incident_context=incident_context,
+                anchor_searcher=anchor_searcher,
+            )
+            anchor_discovery_status = discovered["anchor_discovery_status"]
+            anchor_discovery_url = discovered["anchor_discovery_url"]
+            anchor_discovery_hash = discovered["anchor_discovery_seed_transaction_hash"]
+            anchor_discovery_block = discovered["anchor_discovery_block"]
+            anchor_discovery_attempt_count = parse_int(discovered.get("anchor_discovery_attempt_count")) or 0
+            anchor_discovery_timeout_count = parse_int(discovered.get("anchor_discovery_timeout_count")) or 0
+            anchor_discovery_result_statuses = discovered.get("anchor_discovery_result_statuses") or ""
+            seed_hash = seed_hash or anchor_discovery_hash
+            fork_block = fork_block or anchor_discovery_block
+            if seed_hash and not fork_block and supported:
+                rpc_result = _fetch_fork_block_from_rpc(chain, seed_hash, rpc_caller)
+                rpc_backfill_status = rpc_result["rpc_backfill_status"]
+                fork_block = rpc_result["fork_block"] or fork_block
+        else:
+            anchor_discovery_status = "anchor_discovery_skipped:disabled_or_budget"
+
+    missing = [
+        field
+        for field, value in (
+            ("seed_transaction_hash", seed_hash),
+            ("fork_block", fork_block),
+        )
+        if not value
+    ]
+    if not missing:
+        status = "not_required" if row.get("seed_transaction_hash") and row.get("fork_block") else "backfilled_onchain_anchor"
+    elif not supported:
+        status = "blocked_rpc_unsupported"
+    else:
+        status = "missing_onchain_anchor"
+    return {
+        "incident_id": row["incident_id"],
+        "slug": row["slug"],
+        "target": row["target"],
+        "event_date": row["event_date"],
+        "chain": chain,
+        "chain_id": row.get("chain_id") or "",
+        "rpc_provider": rpc_provider,
+        "rpc_env": rpc_env_for_chain(chain),
+        "rpc_supported": str(supported).lower(),
+        "security_anchor": row["security_anchor"],
+        "backfill_status": status,
+        "missing_onchain_fields": "|".join(missing),
+        "seed_transaction_hash": seed_hash,
+        "fork_block": fork_block,
+        "source_fetch_status": source_fetch_status,
+        "source_evidence_url": source_evidence_url,
+        "source_extracted_seed_transaction_hash": source_extracted_hash,
+        "source_extracted_block": source_extracted_block,
+        "anchor_discovery_status": anchor_discovery_status,
+        "anchor_discovery_url": anchor_discovery_url,
+        "anchor_discovery_seed_transaction_hash": anchor_discovery_hash,
+        "anchor_discovery_block": anchor_discovery_block,
+        "anchor_discovery_attempt_count": str(anchor_discovery_attempt_count),
+        "anchor_discovery_timeout_count": str(anchor_discovery_timeout_count),
+        "anchor_discovery_result_statuses": anchor_discovery_result_statuses,
+        "rpc_backfill_status": rpc_backfill_status,
+        "reference_url": row["reference_url"],
+        "security_report_sources": row["security_report_sources"],
+    }
+
+
+def _security_summary(enriched_rows: list[dict[str, str]], original_rows: list[dict[str, str]]) -> dict[str, int]:
+    return {
+        "candidate_count": len(enriched_rows),
+        "candidate_discovery_count": sum(1 for row in enriched_rows if json.loads(row["candidate_discovery_sources"])),
+        "security_anchored_count": sum(1 for row in enriched_rows if row["security_anchor"] == "true"),
+        "missing_security_anchor_count": sum(1 for row in enriched_rows if row["security_anchor"] != "true"),
+        "text_only_security_mentions_ignored_count": sum(
+            1 for row in original_rows if text_only_security_mentions_ignored(row)
+        ),
+    }
+
+
+def _backfill_summary(enriched_rows: list[dict[str, str]], backfill_rows: list[dict[str, str]]) -> dict[str, int]:
+    return {
+        "backfill_candidate_count": len(backfill_rows),
+        "security_anchored_backfill_count": sum(1 for row in backfill_rows if row["security_anchor"] == "true"),
+        "reference_only_backfill_count": sum(1 for row in backfill_rows if row["security_anchor"] != "true"),
+        # Backward-compatible alias kept for existing consumers.
+        "security_anchored_count": sum(1 for row in backfill_rows if row["security_anchor"] == "true"),
+        "not_required_count": sum(1 for row in backfill_rows if row["backfill_status"] == "not_required"),
+        "backfilled_onchain_anchor_count": sum(
+            1 for row in backfill_rows if row["backfill_status"] == "backfilled_onchain_anchor"
+        ),
+        "missing_onchain_anchor_count": sum(
+            1 for row in backfill_rows if row["backfill_status"] == "missing_onchain_anchor"
+        ),
+        "blocked_rpc_unsupported_count": sum(
+            1 for row in backfill_rows if row["backfill_status"] == "blocked_rpc_unsupported"
+        ),
+        "anchor_discovered_count": sum(
+            1 for row in backfill_rows if row.get("anchor_discovery_status") == "discovered"
+        ),
+        "anchor_discovery_attempted_count": sum(
+            1 for row in backfill_rows if parse_int(row.get("anchor_discovery_attempt_count")) or 0
+        ),
+        "anchor_discovery_result_count": sum(
+            parse_int(row.get("anchor_discovery_attempt_count")) or 0 for row in backfill_rows
+        ),
+        "anchor_discovery_timeout_result_count": sum(
+            parse_int(row.get("anchor_discovery_timeout_count")) or 0 for row in backfill_rows
+        ),
+        "anchor_discovery_exhausted_count": sum(
+            1 for row in backfill_rows if str(row.get("anchor_discovery_status") or "").startswith("anchor_discovery_search_exhausted")
+        ),
+        "x_source_fetch_exhausted_count": sum(
+            1
+            for row in backfill_rows
+            if str(row.get("source_fetch_status") or "")
+            in {
+                "twitterapi_io_budget_exhausted",
+                "twitterapi_io_not_configured",
+                "twitterapi_io_http_429",
+                "twitterapi_io_no_tweet",
+                "twitterapi_io_empty_tweet",
+            }
+            and not row.get("seed_transaction_hash")
+            and not row.get("fork_block")
+        ),
+        "onchain_anchor_complete_count": sum(
+            1 for row in backfill_rows if row.get("seed_transaction_hash") and row.get("fork_block")
+        ),
+        "unanchored_skipped_count": sum(
+            1
+            for row in enriched_rows
+            if row["security_anchor"] != "true" and not row.get("seed_transaction_hash") and not extract_seed_transaction_hash(row)
+        ),
+    }
+
+
+def _evidence_quality_errors(backfill_summary: dict[str, int]) -> list[str]:
+    errors: list[str] = []
+    attempted = backfill_summary.get("anchor_discovery_attempted_count", 0)
+    discovered = backfill_summary.get("anchor_discovered_count", 0)
+    complete = backfill_summary.get("onchain_anchor_complete_count", 0)
+    timeouts = backfill_summary.get("anchor_discovery_timeout_result_count", 0)
+    results = backfill_summary.get("anchor_discovery_result_count", 0)
+    if attempted and discovered == 0 and complete == 0:
+        errors.append("anchor_discovery_attempted_without_onchain_anchor")
+    if attempted and results and timeouts == results:
+        errors.append("anchor_discovery_all_attempts_timed_out")
+    if backfill_summary.get("x_source_fetch_exhausted_count", 0) > 0 and complete == 0:
+        errors.append("x_source_fetch_exhausted_without_onchain_anchor")
+    return errors
+
+
+def _partition_incident_rows(
+    incident_rows: list[dict[str, str]],
+    enriched_rows: list[dict[str, str]],
+    backfill_rows: list[dict[str, str]],
+) -> dict[str, Any]:
+    enriched_by_id = {row.get("incident_id", ""): row for row in enriched_rows if row.get("incident_id")}
+    backfill_by_id = {row.get("incident_id", ""): row for row in backfill_rows if row.get("incident_id")}
+
+    anchored_rows: list[dict[str, str]] = []
+    backlog_rows: list[dict[str, str]] = []
+    for incident_row in incident_rows:
+        incident_id = incident_row.get("incident_id") or _sha1(
+            [incident_row.get("target", ""), incident_row.get("event_date", "")]
+        )
+        merged_row = _merge_incident_partition_row(
+            incident_row,
+            security_stage=enriched_by_id.get(incident_id, {}),
+            backfill_stage=backfill_by_id.get(incident_id, {}),
+        )
+        if merged_row.get("security_anchor") == "true":
+            anchored_rows.append(merged_row)
+        else:
+            backlog_rows.append(merged_row)
+
+    summary = {
+        "anchored_incident_count": len(anchored_rows),
+        "candidate_backlog_count": len(backlog_rows),
+        "anchored_onchain_complete_count": sum(
+            1 for row in anchored_rows if row.get("seed_transaction_hash") and row.get("fork_block")
+        ),
+        "anchored_backfill_required_count": sum(
+            1 for row in anchored_rows if not (row.get("seed_transaction_hash") and row.get("fork_block"))
+        ),
+        "candidate_backlog_missing_security_anchor_count": sum(
+            1 for row in backlog_rows if row.get("security_anchor") != "true"
+        ),
+    }
+    fieldnames = _incident_partition_fieldnames(incident_rows, anchored_rows, backlog_rows)
+    return {
+        "anchored_rows": anchored_rows,
+        "backlog_rows": backlog_rows,
+        "summary": summary,
+        "fieldnames": fieldnames,
+    }
+
+
+def _merge_incident_partition_row(
+    incident_row: dict[str, str],
+    *,
+    security_stage: dict[str, str],
+    backfill_stage: dict[str, str],
+) -> dict[str, str]:
+    merged = dict(incident_row)
+    incident_id = incident_row.get("incident_id") or security_stage.get("incident_id") or _sha1(
+        [incident_row.get("target", ""), incident_row.get("event_date", "")]
+    )
+    merged["incident_id"] = incident_id
+    merged["slug"] = security_stage.get("slug") or slugify(
+        incident_row.get("slug") or incident_row.get("target") or incident_row.get("incident") or "incident"
+    )
+    merged["chain"] = security_stage.get("chain") or infer_chain(incident_row)
+    merged["chain_id"] = security_stage.get("chain_id") or (
+        "" if chain_id(merged["chain"]) is None else str(chain_id(merged["chain"]))
+    )
+    merged["reference_url"] = incident_row.get("reference_url") or security_stage.get("reference_url") or ""
+    merged["source_url"] = incident_row.get("source_url") or security_stage.get("source_url") or ""
+    merged["seed_transaction_hash"] = (
+        backfill_stage.get("seed_transaction_hash")
+        or security_stage.get("seed_transaction_hash")
+        or incident_row.get("seed_transaction_hash")
+        or ""
+    )
+    merged["fork_block"] = (
+        backfill_stage.get("fork_block")
+        or security_stage.get("fork_block")
+        or incident_row.get("fork_block")
+        or incident_row.get("replay_block")
+        or ""
+    )
+    for field in (
+        "candidate_discovery_sources",
+        "security_report_sources",
+        "security_source_name",
+        "security_source_url",
+        "security_anchor",
+        "confidence",
+        "evidence_gap",
+    ):
+        merged[field] = security_stage.get(field, "")
+    for field in (
+        "rpc_provider",
+        "rpc_env",
+        "rpc_supported",
+        "backfill_status",
+        "missing_onchain_fields",
+        "source_fetch_status",
+        "source_evidence_url",
+        "source_extracted_seed_transaction_hash",
+        "source_extracted_block",
+        "anchor_discovery_status",
+        "anchor_discovery_url",
+        "anchor_discovery_seed_transaction_hash",
+        "anchor_discovery_block",
+        "anchor_discovery_attempt_count",
+        "anchor_discovery_timeout_count",
+        "anchor_discovery_result_statuses",
+        "rpc_backfill_status",
+    ):
+        merged[field] = backfill_stage.get(field, "")
+    return merged
+
+
+def _incident_partition_fieldnames(
+    original_rows: list[dict[str, str]],
+    anchored_rows: list[dict[str, str]],
+    backlog_rows: list[dict[str, str]],
+) -> list[str]:
+    ordered: list[str] = []
+    for rows in (original_rows, anchored_rows, backlog_rows):
+        for row in rows:
+            for field in row.keys():
+                if field not in ordered:
+                    ordered.append(field)
+    for field in INCIDENT_PARTITION_EXTRA_FIELDS:
+        if field not in ordered:
+            ordered.append(field)
+    return ordered
+
+
+def _prioritized_reference_fetch_ids(
+    rows: list[dict[str, str]],
+    rpc_supported_chains: set[str],
+    budget: int,
+) -> set[str]:
+    if budget <= 0:
+        return set()
+    return _top_budgeted_incident_ids(
+        rows,
+        budget,
+        priority_fn=lambda row: _reference_fetch_priority(row, rpc_supported_chains),
+    )
+
+
+def _prioritized_anchor_discovery_ids(
+    rows: list[dict[str, str]],
+    rpc_supported_chains: set[str],
+    budget: int,
+) -> set[str]:
+    if budget <= 0:
+        return set()
+    return _top_budgeted_incident_ids(
+        rows,
+        budget,
+        priority_fn=lambda row: _anchor_discovery_priority(row, rpc_supported_chains),
+    )
+
+
+def _top_budgeted_incident_ids(
+    rows: list[dict[str, str]],
+    budget: int,
+    *,
+    priority_fn: Callable[[dict[str, str]], int],
+) -> set[str]:
+    ranked: list[tuple[int, int, str]] = []
+    for index, row in enumerate(rows):
+        priority = priority_fn(row)
+        if priority <= 0:
+            continue
+        ranked.append((priority, -index, row["incident_id"]))
+    ranked.sort(reverse=True)
+    return {incident_id for _, _, incident_id in ranked[:budget]}
+
+
+def _reference_fetch_priority(row: dict[str, str], rpc_supported_chains: set[str]) -> int:
+    if row.get("seed_transaction_hash") and row.get("fork_block"):
+        return 0
+    if not _row_rpc_supported(row, rpc_supported_chains):
+        return 0
+    priority = 10
+    if _row_has_direct_tx_source(row):
+        priority += 200
+    if _row_has_tx_hint(row):
+        priority += 100
+    if row.get("security_anchor") == "true":
+        priority += 80
+    if _row_has_security_social_source(row):
+        priority += 20
+    return priority
+
+
+def _anchor_discovery_priority(row: dict[str, str], rpc_supported_chains: set[str]) -> int:
+    if row.get("seed_transaction_hash") and row.get("fork_block"):
+        return 0
+    if not _row_rpc_supported(row, rpc_supported_chains):
+        return 0
+    missing_seed = not row.get("seed_transaction_hash")
+    missing_block = not row.get("fork_block")
+    if not missing_seed and not missing_block:
+        return 0
+    priority = 10
+    if _row_has_direct_tx_source(row):
+        priority += 120
+    if row.get("security_anchor") == "true":
+        priority += 100
+    if _row_has_security_social_source(row):
+        priority += 40
+    if _row_has_tx_hint(row):
+        priority += 30
+    if missing_seed:
+        priority += 10
+    if missing_block:
+        priority += 5
+    return priority
+
+
+def _row_rpc_supported(row: dict[str, str], rpc_supported_chains: set[str]) -> bool:
+    return chain_rpc_supported(normalize_chain(row.get("chain") or ""), rpc_supported_chains)
+
+
+def _row_has_security_social_source(row: dict[str, str]) -> bool:
+    return any(
+        _requires_specialized_social_fetch(str(source.get("url") or ""))
+        for source in _safe_json_list(row.get("security_report_sources") or "[]")
+    )
+
+
+def _row_has_direct_tx_source(row: dict[str, str]) -> bool:
+    direct_sources = {
+        "blocksec_phalcon",
+        "metasleuth",
+        "eigenphi",
+        "defihacklabs",
+        "blocksec_phalcon_incidents",
+        "metasleuth_trace",
+        "defihacklabs_replay",
+        "explorer_tx",
+    }
+    for field in ("security_report_sources", "candidate_discovery_sources"):
+        for source in _safe_json_list(row.get(field) or "[]"):
+            if str(source.get("source") or "") in direct_sources:
+                return True
+    return False
+
+
+def _row_has_tx_hint(row: dict[str, str]) -> bool:
+    if extract_seed_transaction_hash(row):
+        return True
+    text = " ".join(
+        [
+            str(row.get("reference_url") or ""),
+            str(row.get("source_url") or ""),
+            str(row.get("description") or ""),
+        ]
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "/tx/",
+            "tx=",
+            "transaction hash",
+            "attack tx",
+            "exploit tx",
+            "etherscan",
+            "bscscan",
+            "arbiscan",
+            "basescan",
+            "polygonscan",
+        )
+    )
+
+
+def _safe_json_list(value: str) -> list[dict[str, str]]:
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [item for item in loaded if isinstance(item, dict)]
+
+
+def _backfill_evidence_sources(row: dict[str, str]) -> list[dict[str, str]]:
+    sources = _safe_json_list(row.get("security_report_sources") or "[]")
+    urls = {str(source.get("url") or "") for source in sources}
+    reference_url = str(row.get("reference_url") or "").strip()
+    if reference_url and reference_url not in urls:
+        sources.append({"source": "reference_url", "url": reference_url})
+    return sources
+
+
+def _extract_onchain_anchor_from_security_sources(
+    sources: list[dict[str, str]],
+    *,
+    incident_context: dict[str, str],
+    source_fetcher: SourceFetcher,
+    allow_reference_fetch: bool,
+) -> dict[str, str]:
+    last_status = "not_attempted"
+    for source in sources:
+        url = str(source.get("url") or "")
+        if not url:
+            continue
+        if not _should_fetch_for_onchain_anchor(source, allow_reference_fetch=allow_reference_fetch):
+            last_status = "source_fetch_skipped:no_tx_hint"
+            continue
+        try:
+            fetched = source_fetcher(url)
+        except Exception as exc:  # pragma: no cover - defensive boundary for live source failures
+            last_status = f"source_fetch_failed:{exc.__class__.__name__}"
+            continue
+        status = str(fetched.get("status") or "fetched")
+        if not _source_fetch_status_is_success(status):
+            last_status = status
+            continue
+        text = str(fetched.get("text") or "")
+        evidence_text = select_incident_context_text(text, incident_context)
+        seed_hash = extract_seed_transaction_hash({"source_text": evidence_text}) or ""
+        block = extract_block_number(evidence_text)
+        if seed_hash or block:
+            return {
+                "source_fetch_status": status,
+                "source_evidence_url": str(fetched.get("url") or url),
+                "source_extracted_seed_transaction_hash": seed_hash,
+                "source_extracted_block": "" if block is None else str(block),
+            }
+        last_status = "fetched_no_onchain_anchor"
+    return {
+        "source_fetch_status": last_status,
+        "source_evidence_url": "",
+        "source_extracted_seed_transaction_hash": "",
+        "source_extracted_block": "",
+    }
+
+
+def _source_fetch_status_is_success(status: str) -> bool:
+    return status in {"fetched", "twitterapi_io_fetched"}
+
+
+def _discover_onchain_anchor(
+    row: dict[str, str],
+    *,
+    incident_context: dict[str, str],
+    anchor_searcher: AnchorSearcher,
+) -> dict[str, str]:
+    try:
+        results = anchor_searcher(_anchor_discovery_context(row, incident_context))
+    except Exception as exc:  # pragma: no cover - defensive boundary for live search failures
+        return _empty_anchor_discovery(f"anchor_discovery_failed:{exc.__class__.__name__}")
+
+    last_status = "anchor_discovery_no_results"
+    result_statuses: list[str] = []
+    for result in results:
+        status = str(result.get("status") or "fetched")
+        result_statuses.append(status)
+        if status != "fetched":
+            last_status = status
+            continue
+        url = str(result.get("url") or "")
+        text = " ".join([url, str(result.get("text") or "")])
+        evidence_text = select_incident_context_text(text, incident_context)
+        seed_hash = extract_seed_transaction_hash({"url": url, "source_text": evidence_text}) or ""
+        block = extract_block_number(evidence_text)
+        if seed_hash or block:
+            evidence_url = extract_transaction_url(evidence_text, seed_hash) or url
+            return {
+                "anchor_discovery_status": "discovered",
+                "anchor_discovery_url": evidence_url,
+                "anchor_discovery_seed_transaction_hash": seed_hash,
+                "anchor_discovery_block": "" if block is None else str(block),
+                **_anchor_discovery_attempt_metadata(result_statuses),
+            }
+        last_status = "anchor_discovery_no_onchain_anchor"
+    return _empty_anchor_discovery(
+        _anchor_discovery_exhausted_status(last_status, result_statuses),
+        result_statuses=result_statuses,
+    )
+
+
+def _empty_anchor_discovery(status: str, *, result_statuses: list[str] | None = None) -> dict[str, str]:
+    return {
+        "anchor_discovery_status": status,
+        "anchor_discovery_url": "",
+        "anchor_discovery_seed_transaction_hash": "",
+        "anchor_discovery_block": "",
+        **_anchor_discovery_attempt_metadata(result_statuses or []),
+    }
+
+
+def _anchor_discovery_exhausted_status(last_status: str, result_statuses: list[str]) -> str:
+    if result_statuses and _anchor_discovery_timeout_count(result_statuses) == len(result_statuses):
+        return "anchor_discovery_search_exhausted:all_timeouts"
+    return last_status
+
+
+def _anchor_discovery_attempt_metadata(result_statuses: list[str]) -> dict[str, str]:
+    return {
+        "anchor_discovery_attempt_count": str(len(result_statuses)),
+        "anchor_discovery_timeout_count": str(_anchor_discovery_timeout_count(result_statuses)),
+        "anchor_discovery_result_statuses": "|".join(_dedupe_strings(result_statuses)),
+    }
+
+
+def _anchor_discovery_timeout_count(result_statuses: list[str]) -> int:
+    return sum(1 for status in result_statuses if "TimeoutError" in status)
+
+
+def _anchor_discovery_context(row: dict[str, str], incident_context: dict[str, str]) -> dict[str, str]:
+    context = {str(key): str(value) for key, value in {**incident_context, **row}.items()}
+    context["target"] = context.get("target") or context.get("incident") or ""
+    context["slug"] = context.get("slug") or slugify(context["target"] or "incident")
+    context["chain"] = normalize_chain(context.get("chain") or "")
+    return context
+
+
+def select_incident_context_text(text: str, incident_context: dict[str, str]) -> str:
+    targets = [
+        str(incident_context.get("target") or ""),
+        str(incident_context.get("slug") or "").replace("-", " "),
+    ]
+    haystack = text or ""
+    lower = haystack.lower()
+    for target in targets:
+        normalized = " ".join(target.split()).lower()
+        if not normalized:
+            continue
+        index = lower.find(normalized)
+        if index >= 0:
+            start = index
+            end = min(len(haystack), index + len(normalized) + 1200)
+            return haystack[start:end]
+    if len(re.findall(r"0x[a-fA-F0-9]{64}", haystack)) > 1:
+        return ""
+    return haystack
+
+
+def _should_fetch_for_onchain_anchor(source: dict[str, str], *, allow_reference_fetch: bool) -> bool:
+    source_name = str(source.get("source") or "")
+    url = str(source.get("url") or "")
+    if source_name != "reference_url":
+        if _requires_specialized_social_fetch(url):
+            return True
+        if source_name in {"blocksec_phalcon", "metasleuth", "eigenphi", "defihacklabs"}:
+            return True
+        if not allow_reference_fetch:
+            return False
+        return True
+    if allow_reference_fetch:
+        return True
+    lowered = url.lower()
+    if extract_seed_transaction_hash({"url": url}):
+        return True
+    return any(marker in lowered for marker in ("/tx/", "tx=", "transaction", "etherscan", "bscscan", "arbiscan", "polygonscan"))
+
+
+def _reference_fetch_budget() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_REFERENCE_FETCH_BUDGET", "20")))
+    except ValueError:
+        return 20
+
+
+def _onchain_anchor_discovery_enabled() -> bool:
+    value = os.environ.get("ABRA_ONCHAIN_ANCHOR_DISCOVERY", "1").strip().lower()
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _onchain_anchor_discovery_budget() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_ONCHAIN_ANCHOR_DISCOVERY_BUDGET", "20")))
+    except ValueError:
+        return 20
+
+
+def search_onchain_anchor_sources(context: dict[str, str]) -> list[dict[str, str]]:
+    """Search public web result pages for transaction/explorer anchors.
+
+    This is a bounded best-effort discovery step. It never creates incidents;
+    it only attempts to add tx/block anchors to an already selected candidate.
+    """
+
+    if not _onchain_anchor_discovery_enabled():
+        return [{"status": "anchor_discovery_skipped:disabled", "url": "", "text": ""}]
+
+    results: list[dict[str, str]] = []
+    max_requests = _onchain_search_max_requests()
+    search_requests = 0
+    second_hop_remaining = _onchain_search_second_hop_max_requests()
+    second_hop_seen: set[str] = set()
+    for query in _onchain_anchor_queries(context):
+        for provider in _onchain_search_providers():
+            if search_requests >= max_requests:
+                return results
+            result = _fetch_anchor_search_result(provider, query)
+            search_requests += 1
+            results.append(result)
+            if result.get("status") == "fetched" and extract_seed_transaction_hash(
+                {"url": result.get("url", ""), "source_text": result.get("text", "")}
+            ):
+                return results
+            if result.get("status") != "fetched" or second_hop_remaining <= 0:
+                continue
+            for trusted_url in _trusted_anchor_links_from_search_result(result):
+                if second_hop_remaining <= 0:
+                    break
+                if trusted_url in second_hop_seen:
+                    continue
+                second_hop_seen.add(trusted_url)
+                second_hop_remaining -= 1
+                second_hop_result = _fetch_trusted_anchor_page(
+                    trusted_url,
+                    provider=provider,
+                    query=query,
+                )
+                results.append(second_hop_result)
+                if second_hop_result.get("status") == "fetched" and extract_seed_transaction_hash(
+                    {
+                        "url": second_hop_result.get("url", ""),
+                        "source_text": second_hop_result.get("text", ""),
+                    }
+                ):
+                    return results
+    return results
+
+
+def _fetch_anchor_search_result(provider: str, query: str) -> dict[str, str]:
+    url = _search_provider_url(provider, query)
+    if not url:
+        return {"status": f"anchor_discovery_skipped:unsupported_search_provider:{provider}", "query": query, "url": "", "text": ""}
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ABRA/1.0 onchain-anchor-discovery (+https://github.com/chainstart/abra)",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_onchain_search_timeout_seconds()) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"status": f"http_{exc.code}", "provider": provider, "query": query, "url": url, "text": ""}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {
+            "status": f"anchor_discovery_failed:{reason_name}",
+            "provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    except OSError as exc:
+        return {
+            "status": f"anchor_discovery_failed:{exc.__class__.__name__}",
+            "provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    text = html.unescape(raw.decode("utf-8", errors="replace"))
+    return {"status": "fetched", "provider": provider, "query": query, "url": url, "text": text}
+
+
+def _fetch_trusted_anchor_page(url: str, *, provider: str, query: str) -> dict[str, str]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ABRA/1.0 onchain-anchor-discovery (+https://github.com/chainstart/abra)",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_onchain_search_timeout_seconds()) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {
+            "status": f"anchor_discovery_second_hop_http_{exc.code}",
+            "provider": "second_hop",
+            "source_provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {
+            "status": f"anchor_discovery_second_hop_failed:{reason_name}",
+            "provider": "second_hop",
+            "source_provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    except OSError as exc:
+        return {
+            "status": f"anchor_discovery_second_hop_failed:{exc.__class__.__name__}",
+            "provider": "second_hop",
+            "source_provider": provider,
+            "query": query,
+            "url": url,
+            "text": "",
+        }
+    text = html.unescape(raw.decode("utf-8", errors="replace"))
+    return {
+        "status": "fetched",
+        "provider": "second_hop",
+        "source_provider": provider,
+        "query": query,
+        "url": url,
+        "text": text,
+    }
+
+
+def _search_provider_url(provider: str, query: str) -> str:
+    encoded = quote_plus(query)
+    normalized = provider.strip().lower()
+    if normalized in {"duckduckgo", "ddg"}:
+        return f"https://duckduckgo.com/html/?q={encoded}"
+    if normalized == "bing":
+        return f"https://www.bing.com/search?q={encoded}"
+    if normalized == "brave":
+        return f"https://search.brave.com/search?q={encoded}"
+    return ""
+
+
+def _onchain_search_providers() -> list[str]:
+    raw = os.environ.get("ABRA_ONCHAIN_SEARCH_PROVIDERS", "duckduckgo,bing,brave")
+    providers = [provider.strip().lower() for provider in raw.split(",") if provider.strip()]
+    return _dedupe_strings(providers) or ["duckduckgo"]
+
+
+def _onchain_search_max_requests() -> int:
+    try:
+        return max(1, int(os.environ.get("ABRA_ONCHAIN_SEARCH_MAX_REQUESTS", "6")))
+    except ValueError:
+        return 6
+
+
+def _onchain_search_timeout_seconds() -> float:
+    try:
+        return max(0.5, float(os.environ.get("ABRA_ONCHAIN_SEARCH_TIMEOUT_SECONDS", "5")))
+    except ValueError:
+        return 5.0
+
+
+def _onchain_search_second_hop_max_requests() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_ONCHAIN_SEARCH_SECOND_HOP_MAX_REQUESTS", "3")))
+    except ValueError:
+        return 3
+
+
+def _trusted_anchor_links_from_search_result(result: dict[str, str]) -> list[str]:
+    return [
+        link
+        for link in _extract_candidate_links(str(result.get("text") or ""), base_url=str(result.get("url") or ""))
+        if _is_trusted_anchor_url(link)
+    ]
+
+
+def _extract_candidate_links(text: str, *, base_url: str) -> list[str]:
+    decoded = html.unescape(text or "")
+    candidates: list[str] = []
+    candidates.extend(
+        match.group(1)
+        for match in re.finditer(r"""href\s*=\s*["']([^"']+)["']""", decoded, flags=re.IGNORECASE)
+    )
+    candidates.extend(match.group(0) for match in re.finditer(r"""https?://[^\s"'<>]+""", decoded))
+
+    links: list[str] = []
+    for candidate in candidates:
+        normalized = html.unescape(candidate).strip().rstrip(".,;)")
+        if not normalized:
+            continue
+        unwrapped = _unwrap_search_redirect_url(urljoin(base_url, normalized))
+        if unwrapped:
+            links.append(unwrapped)
+    return _dedupe_strings(links)
+
+
+def _unwrap_search_redirect_url(url: str) -> str:
+    candidate = html.unescape(url).strip()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate)
+    for key in ("uddg", "url", "q", "u"):
+        for value in parse_qs(parsed.query).get(key, []):
+            decoded = unquote(value).strip()
+            if _is_http_url(decoded):
+                return decoded
+            bing_url = _decode_bing_redirect_url(decoded)
+            if bing_url:
+                return bing_url
+    return candidate if _is_http_url(candidate) else ""
+
+
+def _decode_bing_redirect_url(value: str) -> str:
+    token = value[2:] if value.startswith("a1") else value
+    try:
+        decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8", errors="replace")
+    except (ValueError, binascii.Error):
+        return ""
+    return decoded if _is_http_url(decoded) else ""
+
+
+def _is_http_url(value: str) -> bool:
+    return urlparse(value).scheme in {"http", "https"}
+
+
+def _is_trusted_anchor_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = parsed.netloc.lower().split("@")[-1].split(":", 1)[0].removeprefix("www.")
+    return any(host == domain or host.endswith(f".{domain}") for domain in _trusted_anchor_domains())
+
+
+def _trusted_anchor_domains() -> list[str]:
+    return [
+        "etherscan.io",
+        "basescan.org",
+        "bscscan.com",
+        "arbiscan.io",
+        "polygonscan.com",
+        "snowtrace.io",
+        "celoscan.io",
+        "era.zksync.network",
+        "zkevm.polygonscan.com",
+        "blocksec.com",
+        "blockaid.io",
+        "slowmist.io",
+        "peckshield.com",
+        "certik.com",
+        "rekt.news",
+        "immunefi.com",
+        "defimon.xyz",
+        "defimon.io",
+    ]
+
+
+def _onchain_anchor_queries(context: dict[str, str]) -> list[str]:
+    target = str(context.get("target") or context.get("incident") or "").strip()
+    slug = str(context.get("slug") or "").replace("-", " ").strip()
+    chain = normalize_chain(str(context.get("chain") or ""))
+    date = str(context.get("event_date") or "").strip()
+    security_source_names = _security_source_names_from_context(context)
+    names = [name for name in (target, slug) if name]
+    if not names:
+        names = ["DeFi exploit"]
+    base = names[0]
+    explorer = _explorer_domain_for_chain(chain)
+    suffix = f" {date}" if date else ""
+    queries = _source_specific_anchor_queries(
+        base=base,
+        suffix=suffix,
+        explorer=explorer,
+        security_source_names=security_source_names,
+    )
+    queries.extend(
+        [
+        f"{base}{suffix} site:{explorer}/tx",
+        f"{base}{suffix} exploit transaction hash",
+        f"{base}{suffix} attack tx hash",
+        f"{base}{suffix} {explorer} tx",
+        f"{base}{suffix} BlockSec PeckShield CertiK exploit transaction",
+        ]
+    )
+    for source_name in security_source_names:
+        queries.extend(
+            [
+                f"{base}{suffix} {source_name} transaction hash",
+                f"{base}{suffix} {source_name} {explorer} tx",
+            ]
+        )
+    return _dedupe_strings(queries)
+
+
+def _source_specific_anchor_queries(
+    *,
+    base: str,
+    suffix: str,
+    explorer: str,
+    security_source_names: list[str],
+) -> list[str]:
+    queries: list[str] = []
+    for source_name in security_source_names:
+        for domain in _security_source_search_domains(source_name):
+            queries.extend(
+                [
+                    f"{base}{suffix} site:{domain} tx",
+                    f"{base}{suffix} site:{domain} transaction hash",
+                    f"{base}{suffix} site:{domain} {explorer}",
+                ]
+            )
+    for domain in _common_security_anchor_domains():
+        queries.append(f"{base}{suffix} site:{domain} tx")
+    return queries
+
+
+def _security_source_search_domains(source_name: str) -> list[str]:
+    normalized = source_name.strip().lower()
+    domains_by_source = {
+        "blockaid": ["blockaid.io", "app.blockaid.io"],
+        "blocksec": ["blocksec.com", "app.blocksec.com", "phalcon.blocksec.com"],
+        "blocksec_phalcon": ["phalcon.blocksec.com", "app.blocksec.com"],
+        "defimon": ["defimon.xyz", "defimon.io", "x.com/DefimonAlerts"],
+        "defihacklabs": ["github.com/SunWeb3Sec/DeFiHackLabs"],
+        "defi_nerd": ["x.com/Defi_Nerd_sec"],
+        "eigenphi": ["eigenphi.io"],
+        "metasleuth": ["metasleuth.io"],
+        "peckshield": ["peckshield.com", "x.com/PeckShieldAlert"],
+        "slowmist": ["slowmist.io", "hacked.slowmist.io", "x.com/SlowMist_Team"],
+        "certik": ["certik.com", "skynet.certik.com", "x.com/CertiKAlert"],
+        "exvul": ["x.com/exvulsec"],
+    }
+    return domains_by_source.get(normalized, [])
+
+
+def _common_security_anchor_domains() -> list[str]:
+    return [
+        "phalcon.blocksec.com",
+        "app.blocksec.com",
+        "blocksec.com",
+        "metasleuth.io",
+        "eigenphi.io",
+        "peckshield.com",
+        "slowmist.io",
+        "hacked.slowmist.io",
+    ]
+
+
+def _security_source_names_from_context(context: dict[str, str]) -> list[str]:
+    names: list[str] = []
+    for source in _safe_json_list(str(context.get("security_report_sources") or "[]")):
+        name = str(source.get("source") or "").strip()
+        if name:
+            names.append(name)
+    return _dedupe_strings(names)
+
+
+def _explorer_domain_for_chain(chain: str) -> str:
+    return {
+        "ethereum": "etherscan.io",
+        "bsc": "bscscan.com",
+        "bnb": "bscscan.com",
+        "polygon": "polygonscan.com",
+        "arbitrum": "arbiscan.io",
+        "optimism": "optimistic.etherscan.io",
+        "base": "basescan.org",
+        "avalanche": "snowtrace.io",
+        "celo": "celoscan.io",
+        "zksync": "era.zksync.network",
+        "polygon_zkevm": "zkevm.polygonscan.com",
+    }.get(normalize_chain(chain), "etherscan.io")
+
+
+def extract_transaction_url(text: str, tx_hash: str = "") -> str:
+    tx_pattern = tx_hash if is_tx_hash(tx_hash) else r"0x[a-fA-F0-9]{64}"
+    pattern = rf"https?://[^\s\"'<>)]*/tx/{tx_pattern}"
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if match:
+        return match.group(0).rstrip(".,;")
+    return ""
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        normalized = " ".join(value.split())
+        key = normalized.lower()
+        if normalized and key not in seen:
+            seen.add(key)
+            deduped.append(normalized)
+    return deduped
+
+
+def fetch_security_source_text(url: str) -> dict[str, str]:
+    if _requires_specialized_social_fetch(url):
+        return fetch_x_security_source_text(url)
+    if os.environ.get("ABRA_EVIDENCE_SOURCE_FETCH", "").strip().lower() in {"0", "false", "no", "off"}:
+        return {"status": "source_fetch_skipped:disabled", "url": url, "text": ""}
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "ABRA/1.0 evidence-backfill (+https://github.com/chainstart/abra)",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content_type = response.headers.get("content-type", "")
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"status": f"http_{exc.code}", "url": url, "text": ""}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {"status": f"source_fetch_failed:{reason_name}", "url": url, "text": ""}
+    text = raw.decode("utf-8", errors="replace")
+    return {"status": "fetched", "url": url, "content_type": content_type, "text": text}
+
+
+def fetch_x_security_source_text(url: str) -> dict[str, str]:
+    tweet_id = _tweet_id_from_url(url)
+    if not tweet_id:
+        return {"status": "twitterapi_io_invalid_x_url", "url": url, "text": ""}
+    api_key = os.environ.get("TWITTERAPI_IO_KEY", "").strip()
+    if not api_key:
+        return {"status": "twitterapi_io_not_configured", "url": url, "text": ""}
+
+    root_fetch = _fetch_twitterapi_io_json(
+        "/twitter/tweets",
+        {"tweet_ids": tweet_id},
+        api_key=api_key,
+        cache_key=tweet_id,
+    )
+    root_status = str(root_fetch.get("status") or "")
+    if root_status != "twitterapi_io_fetched":
+        return {"status": root_status, "url": url, "text": ""}
+
+    combined_payload = _twitterapi_io_combined_payload(root_fetch["payload"])
+    cache_statuses = [str(root_fetch.get("cache") or "miss")]
+    if not _twitterapi_io_payload_has_onchain_anchor(combined_payload):
+        for enrichment in _twitterapi_io_enrichment_payloads(tweet_id, combined_payload, api_key=api_key):
+            enrichment_status = str(enrichment.get("status") or "")
+            if enrichment_status != "twitterapi_io_fetched":
+                if enrichment_status == "twitterapi_io_budget_exhausted":
+                    break
+                continue
+            cache_statuses.append(str(enrichment.get("cache") or "miss"))
+            _twitterapi_io_extend_combined_payload(combined_payload, enrichment["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(combined_payload):
+                break
+
+    return _twitterapi_io_payload_to_source_text(
+        combined_payload,
+        url=url,
+        cache_status="mixed" if len(set(cache_statuses)) > 1 else cache_statuses[0],
+    )
+
+
+def _fetch_twitterapi_io_json(
+    endpoint: str,
+    params: dict[str, str],
+    *,
+    api_key: str,
+    cache_key: str,
+) -> dict[str, Any]:
+    cached = _read_twitterapi_io_cache_key(cache_key)
+    if cached is not None:
+        return {"status": "twitterapi_io_fetched", "payload": cached, "cache": "hit"}
+    if not _claim_twitterapi_io_request_budget():
+        return {"status": "twitterapi_io_budget_exhausted", "payload": {}, "cache": "miss"}
+
+    request_url = f"https://api.twitterapi.io{endpoint}?{urlencode(params)}"
+    request = urllib.request.Request(
+        request_url,
+        headers={
+            "User-Agent": "ABRA/1.0 twitterapi-io-x-source (+https://github.com/chainstart/abra)",
+            "Accept": "application/json",
+            "X-API-Key": api_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_twitterapi_io_timeout_seconds()) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"status": f"twitterapi_io_http_{exc.code}", "payload": {}, "cache": "miss"}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {"status": f"twitterapi_io_failed:{reason_name}", "payload": {}, "cache": "miss"}
+    except OSError as exc:
+        return {"status": f"twitterapi_io_failed:{exc.__class__.__name__}", "payload": {}, "cache": "miss"}
+    try:
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {"status": "twitterapi_io_invalid_json", "payload": {}, "cache": "miss"}
+    if not isinstance(payload, dict):
+        return {"status": "twitterapi_io_invalid_json", "payload": {}, "cache": "miss"}
+    _write_twitterapi_io_cache_key(cache_key, payload)
+    return {"status": "twitterapi_io_fetched", "payload": payload, "cache": "miss"}
+
+
+def _twitterapi_io_enrichment_payloads(
+    tweet_id: str,
+    combined_payload: dict[str, Any],
+    *,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    enrichments: list[dict[str, Any]] = []
+    for fetch_result in _twitterapi_io_thread_context_payloads(tweet_id, api_key=api_key):
+        enrichments.append(fetch_result)
+        if fetch_result.get("status") == "twitterapi_io_fetched":
+            preview = _twitterapi_io_combined_payload(fetch_result["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(preview):
+                return enrichments
+    if enrichments and enrichments[-1].get("status") == "twitterapi_io_budget_exhausted":
+        return enrichments
+
+    for fetch_result in _twitterapi_io_reply_payloads(tweet_id, api_key=api_key):
+        enrichments.append(fetch_result)
+        if fetch_result.get("status") == "twitterapi_io_fetched":
+            preview = _twitterapi_io_combined_payload(fetch_result["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(preview):
+                return enrichments
+    if enrichments and enrichments[-1].get("status") == "twitterapi_io_budget_exhausted":
+        return enrichments
+
+    for fetch_result in _twitterapi_io_advanced_search_payloads(combined_payload, api_key=api_key):
+        enrichments.append(fetch_result)
+        if fetch_result.get("status") == "twitterapi_io_fetched":
+            preview = _twitterapi_io_combined_payload(fetch_result["payload"])
+            if _twitterapi_io_payload_has_onchain_anchor(preview):
+                return enrichments
+    return enrichments
+
+
+def _twitterapi_io_thread_context_payloads(tweet_id: str, *, api_key: str) -> list[dict[str, Any]]:
+    return _twitterapi_io_paginated_payloads(
+        "/twitter/tweet/thread_context",
+        {"tweetId": tweet_id},
+        cache_prefix=f"thread_context_{tweet_id}",
+        max_pages=_twitterapi_io_thread_context_max_pages(),
+        api_key=api_key,
+    )
+
+
+def _twitterapi_io_reply_payloads(tweet_id: str, *, api_key: str) -> list[dict[str, Any]]:
+    return _twitterapi_io_paginated_payloads(
+        "/twitter/tweet/replies",
+        {"tweetId": tweet_id},
+        cache_prefix=f"replies_{tweet_id}",
+        max_pages=_twitterapi_io_reply_max_pages(),
+        api_key=api_key,
+    )
+
+
+def _twitterapi_io_paginated_payloads(
+    endpoint: str,
+    params: dict[str, str],
+    *,
+    cache_prefix: str,
+    max_pages: int,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    cursor = ""
+    for page in range(max_pages):
+        page_params = dict(params)
+        if cursor:
+            page_params["cursor"] = cursor
+        result = _fetch_twitterapi_io_json(
+            endpoint,
+            page_params,
+            api_key=api_key,
+            cache_key=f"{cache_prefix}_{page}_{cursor or 'first'}",
+        )
+        results.append(result)
+        if result.get("status") != "twitterapi_io_fetched":
+            break
+        payload = result.get("payload")
+        if not isinstance(payload, dict):
+            break
+        if not payload.get("has_next_page"):
+            break
+        cursor = str(payload.get("next_cursor") or "")
+        if not cursor:
+            break
+    return results
+
+
+def _twitterapi_io_advanced_search_payloads(
+    combined_payload: dict[str, Any],
+    *,
+    api_key: str,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for query in _twitterapi_io_advanced_search_queries(combined_payload)[: _twitterapi_io_advanced_search_max_queries()]:
+        result = _fetch_twitterapi_io_json(
+            "/twitter/tweet/advanced_search",
+            {"query": query, "queryType": "Latest"},
+            api_key=api_key,
+            cache_key=f"advanced_search_{_sha1([query])[:16]}",
+        )
+        if isinstance(result.get("payload"), dict):
+            result["payload"]["_abra_source"] = "advanced_search"
+        results.append(result)
+        if result.get("status") != "twitterapi_io_fetched":
+            break
+        payload = result.get("payload")
+        if isinstance(payload, dict) and _twitterapi_io_payload_has_onchain_anchor(_twitterapi_io_combined_payload(payload)):
+            break
+    return results
+
+
+def _twitterapi_io_advanced_search_queries(combined_payload: dict[str, Any]) -> list[str]:
+    root_tweet = _twitterapi_io_tweets_from_payload(combined_payload)[0] if _twitterapi_io_tweets_from_payload(combined_payload) else {}
+    if not isinstance(root_tweet, dict):
+        return []
+    author = _twitterapi_io_author_username(root_tweet)
+    conversation_id = str(root_tweet.get("conversationId") or root_tweet.get("id") or "").strip()
+    terms = _twitterapi_io_search_terms(root_tweet)
+    time_window = _twitterapi_io_search_time_window(root_tweet)
+    onchain_terms = "(tx OR transaction OR etherscan OR arbiscan OR bscscan OR basescan OR polygonscan)"
+    queries: list[str] = []
+    if conversation_id:
+        queries.append(" ".join(part for part in (f"conversation_id:{conversation_id}", onchain_terms, time_window) if part))
+    if author and terms:
+        query_terms = " OR ".join(f'"{term}"' for term in terms[:4])
+        queries.append(" ".join(part for part in (f"from:{author}", f"({query_terms})", onchain_terms, time_window) if part))
+    if author:
+        queries.append(" ".join(part for part in (f"from:{author}", onchain_terms, time_window) if part))
+    return _dedupe_strings(queries)
+
+
+def _twitterapi_io_search_terms(tweet: dict[str, Any]) -> list[str]:
+    terms: list[str] = []
+    entities = tweet.get("entities")
+    if isinstance(entities, dict):
+        for mention in entities.get("user_mentions") or []:
+            if not isinstance(mention, dict):
+                continue
+            for key in ("screen_name", "name"):
+                value = str(mention.get(key) or "").strip()
+                if value:
+                    terms.append(value)
+    text = str(tweet.get("text") or "")
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]{2,}(?:\s+[A-Z][A-Za-z0-9]{2,}){0,2}\b", text):
+        term = " ".join(match.group(0).split())
+        if term.lower() not in {"community alert", "more details"}:
+            terms.append(term)
+    return _dedupe_strings(terms)
+
+
+def _twitterapi_io_search_time_window(tweet: dict[str, Any]) -> str:
+    created_at = str(tweet.get("createdAt") or "").strip()
+    if not created_at:
+        return ""
+    try:
+        dt = datetime.strptime(created_at, "%a %b %d %H:%M:%S %z %Y")
+    except ValueError:
+        return ""
+    since_time = int((dt - timedelta(days=2)).timestamp())
+    until_time = int((dt + timedelta(days=5)).timestamp())
+    return f"since_time:{since_time} until_time:{until_time}"
+
+
+def _twitterapi_io_author_username(tweet: dict[str, Any]) -> str:
+    author = tweet.get("author")
+    if not isinstance(author, dict):
+        return ""
+    return str(author.get("userName") or author.get("screen_name") or "").strip().lstrip("@")
+
+
+def _twitterapi_io_combined_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    combined: dict[str, Any] = {
+        "tweets": [],
+        "root_author": _twitterapi_io_root_author(payload),
+        "conversation_id": _twitterapi_io_root_conversation_id(payload),
+        "source": str(payload.get("_abra_source") or ""),
+    }
+    _twitterapi_io_extend_combined_payload(combined, payload)
+    return combined
+
+
+def _twitterapi_io_extend_combined_payload(combined: dict[str, Any], payload: dict[str, Any]) -> None:
+    tweets = combined.setdefault("tweets", [])
+    if not isinstance(tweets, list):
+        combined["tweets"] = tweets = []
+    seen = {str(tweet.get("id") or tweet.get("url") or "") for tweet in tweets if isinstance(tweet, dict)}
+    payload_source = str(payload.get("_abra_source") or "")
+    for tweet in _twitterapi_io_tweets_from_payload(payload):
+        if not _twitterapi_io_should_keep_tweet(tweet, combined, payload_source=payload_source):
+            continue
+        key = str(tweet.get("id") or tweet.get("url") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        tweets.append(tweet)
+
+
+def _twitterapi_io_root_author(payload: dict[str, Any]) -> str:
+    tweets = _twitterapi_io_tweets_from_payload(payload)
+    if not tweets:
+        return ""
+    return _twitterapi_io_author_username(tweets[0])
+
+
+def _twitterapi_io_root_conversation_id(payload: dict[str, Any]) -> str:
+    tweets = _twitterapi_io_tweets_from_payload(payload)
+    if not tweets:
+        return ""
+    return str(tweets[0].get("conversationId") or tweets[0].get("id") or "").strip()
+
+
+def _twitterapi_io_should_keep_tweet(
+    tweet: dict[str, Any],
+    combined: dict[str, Any],
+    *,
+    payload_source: str = "",
+) -> bool:
+    if payload_source == "advanced_search" or str(combined.get("source") or "") == "advanced_search":
+        tweet_text = "\n".join(_twitterapi_io_tweet_text_parts(tweet))
+        return bool(extract_seed_transaction_hash({"source_text": tweet_text}) or extract_block_number(tweet_text) is not None)
+    root_conversation_id = str(combined.get("conversation_id") or "")
+    conversation_id = str(tweet.get("conversationId") or tweet.get("id") or "").strip()
+    if root_conversation_id and conversation_id and conversation_id != root_conversation_id:
+        return False
+    root_author = str(combined.get("root_author") or "")
+    if not root_author:
+        return True
+    author = _twitterapi_io_author_username(tweet)
+    if author.lower() == root_author.lower():
+        return True
+    tweet_text = "\n".join(_twitterapi_io_tweet_text_parts(tweet))
+    return bool(extract_seed_transaction_hash({"source_text": tweet_text}) or extract_block_number(tweet_text) is not None)
+
+
+def _twitterapi_io_payload_to_source_text(payload: dict[str, Any], *, url: str, cache_status: str) -> dict[str, str]:
+    tweets = payload.get("tweets")
+    if not isinstance(tweets, list) or not tweets:
+        return {"status": "twitterapi_io_no_tweet", "url": url, "text": "", "cache": cache_status}
+    text_parts: list[str] = []
+    evidence_url = url
+    for tweet in tweets:
+        if not isinstance(tweet, dict):
+            continue
+        tweet_text_parts = _twitterapi_io_tweet_text_parts(tweet)
+        tweet_text = "\n".join(tweet_text_parts)
+        if extract_seed_transaction_hash({"source_text": tweet_text}) or extract_block_number(tweet_text) is not None:
+            evidence_url = str(tweet.get("url") or evidence_url)
+        text_parts.extend(tweet_text_parts)
+    text = html.unescape("\n".join(part for part in text_parts if part))
+    if not text:
+        return {"status": "twitterapi_io_empty_tweet", "url": evidence_url, "text": "", "cache": cache_status}
+    return {
+        "status": "twitterapi_io_fetched",
+        "url": evidence_url,
+        "content_type": "application/json",
+        "cache": cache_status,
+        "text": text,
+    }
+
+
+def _twitterapi_io_payload_has_onchain_anchor(payload: dict[str, Any]) -> bool:
+    text = _twitterapi_io_payload_text(payload)
+    return bool(extract_seed_transaction_hash({"source_text": text}) or extract_block_number(text) is not None)
+
+
+def _twitterapi_io_payload_text(payload: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for tweet in _twitterapi_io_tweets_from_payload(payload):
+        parts.extend(_twitterapi_io_tweet_text_parts(tweet))
+    return html.unescape("\n".join(part for part in parts if part))
+
+
+def _twitterapi_io_tweets_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    tweets: list[dict[str, Any]] = []
+    for key in ("tweets", "replies"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            tweets.extend(item for item in values if isinstance(item, dict))
+    return tweets
+
+
+def _twitterapi_io_tweet_text_parts(tweet: dict[str, Any]) -> list[str]:
+    parts: list[str] = []
+    text = str(tweet.get("text") or "")
+    if text:
+        parts.append(text)
+    parts.extend(_twitterapi_io_entity_urls(tweet))
+    for nested_key in ("quoted_tweet", "retweeted_tweet"):
+        nested = tweet.get(nested_key)
+        if isinstance(nested, dict):
+            parts.extend(_twitterapi_io_tweet_text_parts(nested))
+    return parts
+
+
+def _twitterapi_io_entity_urls(tweet: dict[str, Any]) -> list[str]:
+    entities = tweet.get("entities")
+    if not isinstance(entities, dict):
+        return []
+    urls = entities.get("urls")
+    if not isinstance(urls, list):
+        return []
+    extracted: list[str] = []
+    for item in urls:
+        if isinstance(item, str):
+            extracted.append(item)
+        elif isinstance(item, dict):
+            for key in ("expanded_url", "expandedUrl", "url", "display_url", "displayUrl"):
+                value = str(item.get(key) or "").strip()
+                if value:
+                    extracted.append(value)
+                    break
+    return extracted
+
+
+def _read_twitterapi_io_cache_key(cache_key: str) -> dict[str, Any] | None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return None
+    path = cache_dir / f"{_safe_twitterapi_io_cache_key(cache_key)}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_twitterapi_io_cache_key(cache_key: str, payload: dict[str, Any]) -> None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{_safe_twitterapi_io_cache_key(cache_key)}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _safe_twitterapi_io_cache_key(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
+    return safe[:180] or _sha1([value])[:16]
+
+
+def _tweet_id_from_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower().removeprefix("www.")
+    if host not in {"x.com", "twitter.com"}:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    for index, part in enumerate(parts):
+        if part.lower() == "status" and index + 1 < len(parts):
+            candidate = parts[index + 1]
+            return candidate if candidate.isdigit() else ""
+    return ""
+
+
+def _twitterapi_io_cache_dir() -> Path | None:
+    raw = os.environ.get("ABRA_TWITTERAPI_IO_CACHE_DIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _read_twitterapi_io_cache(tweet_id: str) -> dict[str, Any] | None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return None
+    path = cache_dir / f"{tweet_id}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_twitterapi_io_cache(tweet_id: str, payload: dict[str, Any]) -> None:
+    cache_dir = _twitterapi_io_cache_dir()
+    if cache_dir is None:
+        return
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / f"{tweet_id}.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
+def _twitterapi_io_timeout_seconds() -> float:
+    try:
+        return max(0.5, float(os.environ.get("ABRA_TWITTERAPI_IO_TIMEOUT_SECONDS", "10")))
+    except ValueError:
+        return 10.0
+
+
+def _twitterapi_io_max_requests() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_TWITTERAPI_IO_MAX_REQUESTS", "8")))
+    except ValueError:
+        return 8
+
+
+def _twitterapi_io_thread_context_max_pages() -> int:
+    try:
+        return max(1, int(os.environ.get("ABRA_TWITTERAPI_IO_THREAD_CONTEXT_MAX_PAGES", "2")))
+    except ValueError:
+        return 2
+
+
+def _twitterapi_io_reply_max_pages() -> int:
+    try:
+        return max(1, int(os.environ.get("ABRA_TWITTERAPI_IO_REPLY_MAX_PAGES", "1")))
+    except ValueError:
+        return 1
+
+
+def _twitterapi_io_advanced_search_max_queries() -> int:
+    try:
+        return max(0, int(os.environ.get("ABRA_TWITTERAPI_IO_ADVANCED_SEARCH_MAX_QUERIES", "3")))
+    except ValueError:
+        return 3
+
+
+def _reset_twitterapi_io_request_budget() -> None:
+    global _TWITTERAPI_IO_REQUEST_COUNT
+    _TWITTERAPI_IO_REQUEST_COUNT = 0
+
+
+def _claim_twitterapi_io_request_budget() -> bool:
+    global _TWITTERAPI_IO_REQUEST_COUNT
+    if _TWITTERAPI_IO_REQUEST_COUNT >= _twitterapi_io_max_requests():
+        return False
+    _TWITTERAPI_IO_REQUEST_COUNT += 1
+    return True
+
+
+def _requires_specialized_social_fetch(url: str) -> bool:
+    host = urlparse(url.strip()).netloc.lower().removeprefix("www.")
+    return host in {"x.com", "twitter.com"}
+
+
+def json_rpc_call(chain: str, method: str, params: list[str]) -> dict[str, Any]:
+    rpc_url = rpc_url_for_chain(chain)
+    if not rpc_url:
+        return {"error": "rpc_url_missing"}
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
+    request = urllib.request.Request(
+        rpc_url,
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(1_000_000)
+    except urllib.error.HTTPError as exc:
+        return {"error": f"http_{exc.code}"}
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", "")
+        reason_name = reason.__class__.__name__ if reason else exc.__class__.__name__
+        return {"error": f"rpc_transport_failed:{reason_name}"}
+    try:
+        decoded = json.loads(raw.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {"error": "rpc_invalid_json"}
+    if decoded.get("error"):
+        return {"error": "rpc_error", "details": decoded.get("error")}
+    result = decoded.get("result")
+    return result if isinstance(result, dict) else {"error": "rpc_empty_result"}
+
+
+def _fetch_fork_block_from_rpc(chain: str, seed_hash: str, rpc_caller: RpcCaller) -> dict[str, str]:
+    try:
+        receipt = rpc_caller(chain, "eth_getTransactionReceipt", [seed_hash])
+    except Exception as exc:  # pragma: no cover - defensive boundary for live RPC failures
+        return {"rpc_backfill_status": f"rpc_failed:{exc.__class__.__name__}", "fork_block": ""}
+    if not isinstance(receipt, dict):
+        return {"rpc_backfill_status": "rpc_invalid_response", "fork_block": ""}
+    if receipt.get("error"):
+        return {"rpc_backfill_status": str(receipt["error"]), "fork_block": ""}
+    block = parse_rpc_int(receipt.get("blockNumber"))
+    if block is None:
+        return {"rpc_backfill_status": "receipt_missing_block", "fork_block": ""}
+    return {"rpc_backfill_status": "receipt_verified", "fork_block": str(block)}
+
+
+def extract_block_number(text: str) -> int | None:
+    for pattern in (
+        r"\b(?:fork\s+block|replay\s+block|block\s+number|block|height)\s*[:#]?\s*([0-9][0-9,]{3,})\b",
+        r"\bat\s+block\s+([0-9][0-9,]{3,})\b",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return parse_int(match.group(1))
+    return None
+
+
+def parse_rpc_int(value: Any) -> int | None:
+    if isinstance(value, str) and value.startswith("0x"):
+        try:
+            return int(value, 16)
+        except ValueError:
+            return None
+    return parse_int(value)
+
+
+def _resolve_repo_path(root: Path, value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return root / path
+
+
+def _read_csv(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Incident CSV not found: {path}")
+    with path.open("r", encoding="utf-8", newline="") as fp:
+        return list(csv.DictReader(fp))
+
+
+def _write_csv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _json_cell(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _confidence(*, security_anchor: bool, candidate_sources: list[dict[str, str]]) -> str:
+    if security_anchor and candidate_sources:
+        return "high"
+    if security_anchor:
+        return "medium"
+    return "low"
+
+
+def extract_seed_transaction_hash(row: dict[str, str]) -> str | None:
+    for key in ("seed_transaction_hash", "transaction_hash", "tx_hash", "attack_tx", "tx"):
+        value = (row.get(key) or "").strip()
+        if is_tx_hash(value):
+            return value
+    text = " ".join(str(value) for value in row.values())
+    match = re.search(r"0x[a-fA-F0-9]{64}", text)
+    return match.group(0) if match else None
+
+
+def is_tx_hash(value: str) -> bool:
+    return bool(re.fullmatch(r"0x[a-fA-F0-9]{64}", value or ""))
+
+
+def parse_int(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+    slug = re.sub(r"^\\d{4}-\\d{2}-\\d{2}-", "", slug)
+    slug = re.sub(r"-[a-f0-9]{8}$", "", slug)
+    return slug or "incident"
+
+
+def _sha1(parts: list[str]) -> str:
+    import hashlib
+
+    h = hashlib.sha1()
+    for part in parts:
+        h.update(str(part).encode("utf-8"))
+        h.update(b"|")
+    return h.hexdigest()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

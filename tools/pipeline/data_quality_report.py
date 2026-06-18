@@ -16,7 +16,19 @@ def safe_pct(numerator: int, denominator: int) -> str:
     return f"{(numerator / denominator) * 100:.2f}%"
 
 
-def render_report(incidents: list[dict], protocols: list[dict], incidents_csv: str, protocols_csv: str) -> str:
+def render_report(
+    incidents: list[dict],
+    protocols: list[dict],
+    incidents_csv: str,
+    protocols_csv: str,
+    *,
+    anchored_incidents: list[dict] | None = None,
+    anchored_incidents_csv: str = "",
+    backlog_incidents: list[dict] | None = None,
+    backlog_incidents_csv: str = "",
+) -> str:
+    anchored_incidents = anchored_incidents or []
+    backlog_incidents = backlog_incidents or []
     total = len(incidents)
     unique_ids = len({row.get("incident_id", "") for row in incidents if row.get("incident_id", "")})
     duplicate_count = max(total - unique_ids, 0)
@@ -37,6 +49,9 @@ def render_report(incidents: list[dict], protocols: list[dict], incidents_csv: s
                 loss_parsed += 1
 
     defi_count = sum(1 for row in incidents if (row.get("is_defi", "") or "").lower() == "true")
+    source_breakdown = Counter((row.get("category_filter", "") or "unknown") for row in incidents).most_common(10)
+    direct_tx_count = sum(1 for row in incidents if (row.get("seed_transaction_hash", "") or "").strip())
+    fork_block_count = sum(1 for row in incidents if (row.get("fork_block", "") or "").strip())
     attack_family_top = Counter((row.get("attack_family", "") or "other") for row in incidents).most_common(10)
     attack_method_top = Counter((row.get("attack_method_raw", "") or "unknown") for row in incidents).most_common(10)
 
@@ -46,6 +61,10 @@ def render_report(incidents: list[dict], protocols: list[dict], incidents_csv: s
     lines.append(f"- Generated at (UTC): {now_utc_iso()}")
     lines.append(f"- Incidents source: `{incidents_csv}`")
     lines.append(f"- Protocols source: `{protocols_csv}`")
+    if anchored_incidents_csv:
+        lines.append(f"- Anchored main set: `{anchored_incidents_csv}`")
+    if backlog_incidents_csv:
+        lines.append(f"- Candidate backlog: `{backlog_incidents_csv}`")
     lines.append("")
     lines.append("## Coverage Summary")
     lines.append("")
@@ -55,10 +74,35 @@ def render_report(incidents: list[dict], protocols: list[dict], incidents_csv: s
     lines.append(f"| Unique incident IDs | {unique_ids} |")
     lines.append(f"| Duplicate rows | {duplicate_count} ({safe_pct(duplicate_count, total)}) |")
     lines.append(f"| DeFi-labeled incidents | {defi_count} ({safe_pct(defi_count, total)}) |")
+    lines.append(f"| Seed transaction hash coverage | {direct_tx_count} ({safe_pct(direct_tx_count, total)}) |")
+    lines.append(f"| Fork block coverage | {fork_block_count} ({safe_pct(fork_block_count, total)}) |")
     lines.append(f"| Protocol rows | {len(protocols)} |")
     lines.append(
         f"| Loss parsing coverage | {loss_parsed}/{loss_candidates} ({safe_pct(loss_parsed, loss_candidates)}) |"
     )
+    lines.append("")
+    if anchored_incidents_csv or backlog_incidents_csv:
+        anchored_complete = sum(
+            1 for row in anchored_incidents if (row.get("seed_transaction_hash", "") or "").strip() and (row.get("fork_block", "") or "").strip()
+        )
+        anchored_backfill_required = max(len(anchored_incidents) - anchored_complete, 0)
+        lines.append("## Anchored-First Partition")
+        lines.append("")
+        lines.append("| Metric | Value |")
+        lines.append("|---|---:|")
+        lines.append(f"| Anchored main-set incidents | {len(anchored_incidents)} |")
+        lines.append(f"| Anchored onchain-complete incidents | {anchored_complete} ({safe_pct(anchored_complete, len(anchored_incidents))}) |")
+        lines.append(
+            f"| Anchored incidents still needing tx/block backfill | {anchored_backfill_required} ({safe_pct(anchored_backfill_required, len(anchored_incidents))}) |"
+        )
+        lines.append(f"| Candidate backlog incidents | {len(backlog_incidents)} |")
+        lines.append("")
+    lines.append("## Candidate Source Breakdown")
+    lines.append("")
+    lines.append("| Rank | Candidate Source | Count |")
+    lines.append("|---:|---|---:|")
+    for idx, (name, count) in enumerate(source_breakdown, start=1):
+        lines.append(f"| {idx} | {name} | {count} |")
     lines.append("")
     lines.append("## Missingness")
     lines.append("")
@@ -99,6 +143,16 @@ def main() -> None:
         help="Normalized protocols CSV",
     )
     parser.add_argument(
+        "--anchored-incidents-csv",
+        default="data/processed/incidents_anchored_latest.csv",
+        help="Anchored incident main-set CSV",
+    )
+    parser.add_argument(
+        "--backlog-incidents-csv",
+        default="data/processed/incidents_candidate_backlog_latest.csv",
+        help="Candidate backlog CSV",
+    )
+    parser.add_argument(
         "--output-md",
         default="reports/17_phase1_data_quality.md",
         help="Output markdown report path",
@@ -107,11 +161,19 @@ def main() -> None:
 
     incidents = read_csv(Path(args.incidents_csv))
     protocols = read_csv(Path(args.protocols_csv))
+    anchored_path = Path(args.anchored_incidents_csv)
+    backlog_path = Path(args.backlog_incidents_csv)
+    anchored_incidents = read_csv(anchored_path) if anchored_path.exists() else []
+    backlog_incidents = read_csv(backlog_path) if backlog_path.exists() else []
     report = render_report(
         incidents=incidents,
         protocols=protocols,
         incidents_csv=args.incidents_csv,
         protocols_csv=args.protocols_csv,
+        anchored_incidents=anchored_incidents,
+        anchored_incidents_csv=args.anchored_incidents_csv if anchored_path.exists() else "",
+        backlog_incidents=backlog_incidents,
+        backlog_incidents_csv=args.backlog_incidents_csv if backlog_path.exists() else "",
     )
     out_path = Path(args.output_md)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,4 +183,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
